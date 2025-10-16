@@ -3,8 +3,6 @@ package com.appforcross.editor.analysis
 import android.content.Context
 import android.graphics.*
 import android.net.Uri
-import android.os.Build
-import androidx.annotation.RequiresApi
 import com.appforcross.editor.io.Decoder
 import com.appforcross.editor.logging.Logger
 import com.appforcross.editor.diagnostics.DiagnosticsManager
@@ -55,7 +53,6 @@ object Stage3Analyze {
     private const val PREVIEW_LONG_SIDE = 1024
 
     /** Точка входа: строим превью, считаем маски и метрики, выдаём классификацию. */
-    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun run(ctx: Context, uri: Uri): AnalyzeResult {
         // 0) Декодим исходник (с EXIF-поворотом) и строим превью ≤1024
         val dec = Decoder.decodeUri(ctx, uri)
@@ -101,7 +98,19 @@ object Stage3Analyze {
         val dr = percentile(l, 0.99) - percentile(l, 0.01)
         val satLo = l.count { it <= 0.01f }.toDouble() / l.size
         val satHi = l.count { it >= 0.99f }.toDouble() / l.size
-        val cast = sqrt(planes.okA.map { it*it }.average() + planes.okB.map { it*it }.average())
+        // castOK без map/average/boxing: аккумулируем в double
+        var sumA = 0.0; var sumB = 0.0
+        run {
+            val n = l.size
+            val a = planes.okA; val b = planes.okB
+            var i = 0
+            while (i < n) {
+                val av = a[i].toDouble(); val bv = b[i].toDouble()
+                sumA += av*av; sumB += bv*bv
+                i++
+            }
+        }
+        val cast = sqrt(sumA / l.size + sumB / l.size)
         val noiseY = madAbs(lap)                                     // шум люмы
         val noiseC = 0.5 * (madAbs(planes.okA) + madAbs(planes.okB)) // шум хромы (OKLab A/B)
         val edgeRate = maskPct(edgeMask)
@@ -178,6 +187,23 @@ object Stage3Analyze {
             if (dqIdx.size < cap) dqIdx = IntArray(cap)
             if (dqVal.size < cap) dqVal = FloatArray(cap)
         }
+
+        // Для квантилей/медиан (быстрый select без новых аллокаций)
+        var sel = FloatArray(0)
+        fun ensureSel(n: Int) {
+            if (sel.size < n) sel = FloatArray(n)
+        }
+        // Временный буфер под |a - med| для MAD и проч.
+        var tmpF = FloatArray(0)
+        fun ensureTmpF(n: Int) { if (tmpF.size < n) tmpF = FloatArray(n) }
+        // Интегральные суммы в double, чтобы не плодить отрицательные дисперсии
+        var dS = DoubleArray(0)
+        var dSS = DoubleArray(0)
+        fun ensureIntegralD(n: Int) {
+            if (dS.size < n) dS = DoubleArray(n)
+            if (dSS.size < n) dSS = DoubleArray(n)
+        }
+
     }
     private val scratchTL = ThreadLocal.withInitial { Scratch() }
     private fun scratch(): Scratch = scratchTL.get()
@@ -282,24 +308,27 @@ object Stage3Analyze {
     }
 
     private fun localVariance3_7_9(l: FloatArray, w: Int, h: Int): Triple<FloatArray, FloatArray, FloatArray> {
-        fun integral(a: FloatArray): Pair<FloatArray, FloatArray> {
-            val S = FloatArray(a.size); val SS = FloatArray(a.size)
+        // Интегралы считаем в double, чтобы избежать ошибок вычитания и отрицательных дисперсий.
+        fun integralD(a: FloatArray): Pair<DoubleArray, DoubleArray> {
+            val s = scratch()
+            s.ensureIntegralD(a.size)
+            val S = s.dS; val SS = s.dSS
             fun id(x:Int,y:Int)=y*w+x
-            var rowSum = 0f; var rowSumSq = 0f
+            var rowSum = 0.0; var rowSumSq = 0.0
             for (y in 0 until h) {
-                rowSum = 0f; rowSumSq = 0f
+                rowSum = 0.0; rowSumSq = 0.0
                 for (x in 0 until w) {
-                    val v = a[id(x,y)]
+                    val v = a[id(x,y)].toDouble()
                     rowSum += v; rowSumSq += v*v
-                    val upS = if (y>0) S[id(x,y-1)] else 0f
-                    val upSS = if (y>0) SS[id(x,y-1)] else 0f
+                    val upS = if (y>0) S[id(x,y-1)] else 0.0
+                    val upSS = if (y>0) SS[id(x,y-1)] else 0.0
                     S[id(x,y)] = upS + rowSum
                     SS[id(x,y)] = upSS + rowSumSq
                 }
             }
             return S to SS
         }
-        fun boxVar(S: FloatArray, SS: FloatArray, r: Int): FloatArray {
+        fun boxVar(S: DoubleArray, SS: DoubleArray, r: Int): FloatArray {
             val out = FloatArray(w*h)
             fun id(x:Int,y:Int)=y*w+x
             for (y in 0 until h) for (x in 0 until w) {
@@ -308,22 +337,24 @@ object Stage3Analyze {
                 val x1 = (x + r).coerceIn(0, w-1)
                 val y1 = (y + r).coerceIn(0, h-1)
                 val a = S[id(x1,y1)]
-                val b = if (x0>0) S[id(x0-1,y1)] else 0f
-                val c = if (y0>0) S[id(x1,y0-1)] else 0f
-                val d = if (x0>0 && y0>0) S[id(x0-1,y0-1)] else 0f
+                val b = if (x0>0) S[id(x0-1,y1)] else 0.0
+                val c = if (y0>0) S[id(x1,y0-1)] else 0.0
+                val d = if (x0>0 && y0>0) S[id(x0-1,y0-1)] else 0.0
                 val sum = a - b - c + d
                 val a2 = SS[id(x1,y1)]
-                val b2 = if (x0>0) SS[id(x0-1,y1)] else 0f
-                val c2 = if (y0>0) SS[id(x1,y0-1)] else 0f
-                val d2 = if (x0>0 && y0>0) SS[id(x0-1,y0-1)] else 0f
+                val b2 = if (x0>0) SS[id(x0-1,y1)] else 0.0
+                val c2 = if (y0>0) SS[id(x1,y0-1)] else 0.0
+                val d2 = if (x0>0 && y0>0) SS[id(x0-1,y0-1)] else 0.0
                 val sum2 = a2 - b2 - c2 + d2
                 val n = (x1-x0+1)*(y1-y0+1)
-                val mean = sum / n
-                out[id(x,y)] = (sum2 / n) - mean*mean
+                val mean = sum / n.toDouble()
+                val v = (sum2 / n.toDouble()) - mean*mean
+                // Численная стабильность: дисперсия не может быть отрицательной
+                out[id(x,y)] = kotlin.math.max(0.0, v).toFloat()
             }
             return out
         }
-        val (S, SS) = integral(l)
+        val (S, SS) = integralD(l)
         val var3 = boxVar(S, SS, 1)
         val var7 = boxVar(S, SS, 3)
         val var9 = boxVar(S, SS, 4)
@@ -426,20 +457,62 @@ object Stage3Analyze {
     }
 
     // -------- Метрики и утилиты --------
-    private fun median(a: FloatArray): Float {
-        val copy = a.copyOf(); copy.sort()
-        val m = copy.size/2
-        return if (copy.size%2==1) copy[m] else 0.5f*(copy[m-1]+copy[m])
+    // Быстрый nth-element (Quickselect) с реюзом буфера: O(n) без полной сортировки
+    private fun swap(a: FloatArray, i: Int, j: Int) {
+        val t = a[i]; a[i] = a[j]; a[j] = t
     }
+    private fun partition(a: FloatArray, left: Int, right: Int, pivotIndex: Int): Int {
+        val pivot = a[pivotIndex]
+        swap(a, pivotIndex, right)
+        var store = left
+        var i = left
+        while (i < right) {
+            if (a[i] < pivot) {
+                swap(a, i, store)
+                store++
+            }
+            i++
+        }
+        swap(a, store, right)
+        return store
+    }
+    private fun quickSelectInplace(a: FloatArray, left0: Int, right0: Int, n: Int): Float {
+        var left = left0
+        var right = right0
+        var k = n
+        while (true) {
+            if (left == right) return a[left]
+            val pivotIndex = (left + right) ushr 1 // mid; достаточно стабильно для наших распределений
+            val p = partition(a, left, right, pivotIndex)
+            when {
+                k == p -> return a[k]
+                k <  p -> right = p - 1
+                else   -> left  = p + 1
+            }
+        }
+    }
+    /** Перцентиль на произвольном буфере [buf] длины [len] без новых аллокаций. */
+    private fun percentileOnBuffer(buf: FloatArray, len: Int, p: Double): Float {
+        if (len <= 0) return 0f
+        val idx = ((len - 1) * p).coerceIn(0.0, (len - 1).toDouble())
+        val i0 = floor(idx).toInt()
+        val i1 = ceil(idx).toInt()
+        val v0 = quickSelectInplace(buf, 0, len - 1, i0)
+        if (i1 == i0) return v0
+        val v1 = quickSelectInplace(buf, 0, len - 1, i1)
+        val t = (idx - i0).toFloat()
+        return v0 * (1f - t) + v1 * t
+    }
+    /** Перцентиль массива [a] — копируем в потоко‑локальный буфер и делаем quickselect. */
     private fun percentile(a: FloatArray, p: Double): Float {
-        val copy = a.copyOf(); copy.sort()
-        val idx = ((copy.size-1) * p).coerceIn(0.0, (copy.size-1).toDouble())
-        val i0 = floor(idx).toInt(); val i1 = ceil(idx).toInt()
-        if (i0==i1) return copy[i0]
-        val t = (idx - i0)
-        return (copy[i0]*(1.0-t) + copy[i1]*t).toFloat()
+        val s = scratch()
+        s.ensureSel(a.size)
+        System.arraycopy(a, 0, s.sel, 0, a.size)
+        return percentileOnBuffer(s.sel, a.size, p)
     }
     private fun quantile(a: FloatArray, p: Float) = percentile(a, p.toDouble())
+    private fun median(a: FloatArray): Float = percentile(a, 0.5)
+
     private fun variance(a: FloatArray): Double {
         val mean = a.average()
         var acc=0.0
@@ -448,17 +521,24 @@ object Stage3Analyze {
     }
     private fun madAbs(a: FloatArray): Double {
         val med = median(a)
-        val dev = FloatArray(a.size) { abs(a[it]-med) }
-        return median(dev).toDouble()
+        val s = scratch()
+        s.ensureTmpF(a.size)
+        val dev = s.tmpF
+        var i = 0
+        while (i < a.size) { dev[i] = kotlin.math.abs(a[i] - med); i++ }
+        // На уже заполненном буфере — медиана без копий
+        return percentileOnBuffer(dev, a.size, 0.5).toDouble()
     }
     private fun percentileMasked(field: FloatArray, mask: BooleanArray, p: Double): Double {
-        val v = ArrayList<Float>(field.size)
-        for (i in field.indices) if (mask[i]) v.add(field[i])
-        if (v.isEmpty()) return 0.0
-        val arr = v.toFloatArray(); arr.sort()
-        val idx = ((arr.size-1) * p).coerceIn(0.0, (arr.size-1).toDouble())
-        val i0 = floor(idx).toInt(); val i1 = ceil(idx).toInt()
-        return if (i0==i1) arr[i0].toDouble() else (arr[i0]*(1.0-(idx-i0)) + arr[i1]*(idx-i0)).toDouble()
+        // Без временных коллекций: пишем подходящие значения в scratch.sel
+        var m = 0
+        for (i in field.indices) if (mask[i]) m++
+        if (m == 0) return 0.0
+        val s = scratch()
+        s.ensureSel(m)
+        var j = 0
+        for (i in field.indices) if (mask[i]) { s.sel[j] = field[i]; j++ }
+        return percentileOnBuffer(s.sel, m, p).toDouble()
     }
     /** Быстрый dark-channel: min по RGB → морфологическая эрозия квадратом (r) в O(N) через монотонную очередь. */
     private fun darkChannelScore(bmp: Bitmap, r:Int=7): Double {
