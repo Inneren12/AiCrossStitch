@@ -76,8 +76,10 @@ object Logger {
         log(LogLevel.INFO, cat, msg, data, req, tile)
     fun w(cat: String, msg: String, data: Map<String, Any?> = emptyMap(), req: String? = null, tile: String? = null) =
         log(LogLevel.WARN, cat, msg, data, req, tile)
-    fun e(cat: String, msg: String, data: Map<String, Any?> = emptyMap(), req: String? = null, tile: String? = null, err: Throwable? = null) {
-        val m = if (err != null) data + ("error" to (err.message ?: err.toString())) else data
+    fun e(cat: String, msg: String, data: Map<String, Any?> = emptyMap(),
+          req: String? = null, tile: String? = null, err: Throwable? = null
+    ) {
+        val m = if (err != null) data + ("error" to (err.message ?: err.toString())) + ("stack" to err.stackTraceToString()) else data
         log(LogLevel.ERROR, cat, msg, m, req, tile)
     }
 

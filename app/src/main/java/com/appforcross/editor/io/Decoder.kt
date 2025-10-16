@@ -31,6 +31,7 @@ object Decoder {
         var srcBmp: Bitmap
         var srcCs: ColorSpace?
         val exifOrientation: Int
+        var decodeExclusive = false
 
         if (Build.VERSION.SDK_INT >= 28) {
             // EXIF берём через AFD один раз...
@@ -68,6 +69,10 @@ object Decoder {
                     }
             }
             srcCs = outCs
+            // Новый буфер из ImageDecoder (SOFTWARE) обычно мутируем и эксклюзивен:
+            decodeExclusive = srcBmp.isMutable && (
+                    Build.VERSION.SDK_INT < 26 || srcBmp.config != Bitmap.Config.HARDWARE
+                    )
         } else {
             // Fallback: BitmapFactory (+ inSampleSize для лимита 16 Мп)
             exifOrientation = readExifOrientation(ctx.contentResolver, uri)
@@ -93,6 +98,10 @@ object Decoder {
                     ?: throw IllegalArgumentException("decodeStream failed")
             }
             srcCs = if (Build.VERSION.SDK_INT >= 26) srcBmp.colorSpace else ColorSpace.get(ColorSpace.Named.SRGB)
+            // BitmapFactory.decodeStream создаёт новый софт-буфер → безопасно мутировать
+            decodeExclusive = srcBmp.isMutable && (
+                    Build.VERSION.SDK_INT < 26 || srcBmp.config != Bitmap.Config.HARDWARE
+                    )
         }
 
         // Возвращаем НОВЫЙ bitmap при необходимости поворота, не мутируем исходный in-place.
@@ -101,6 +110,13 @@ object Decoder {
             // освобождаем исходный буфер, если был создан новый
             try { srcBmp.recycle() } catch (_: Throwable) {}
         }
+
+        // Эксклюзивность результата: либо была у исходника (без поворота),
+        // либо у созданного "rotated" кадра, если он мутируем и не HARDWARE.
+        val outExclusive = (
+                if (rotated) outBmp.isMutable else decodeExclusive
+                ) && (Build.VERSION.SDK_INT < 26 || outBmp.config != Bitmap.Config.HARDWARE)
+
         val csName = srcCs?.name ?: "unknown"
         Logger.i("IO", "decode.done", mapOf("w" to outBmp.width, "h" to outBmp.height, "cs" to csName, "mime" to mime, "rotated" to rotated))
         // Повышаем "уверенность" только если пространство не тривиальное sRGB/Linear sRGB.
@@ -118,8 +134,8 @@ object Decoder {
             width = outBmp.width,
             height = outBmp.height,
             mime = mime,
-            // Консервативно: буфер считаем разделяемым до явного копирования выше по пайплайну.
-            exclusive = false
+            // Реальная эксклюзивность буфера (без HARDWARE и с учётом поворота).
+            exclusive = outExclusive
         )
     }
 
@@ -152,19 +168,28 @@ object Decoder {
     }
 
     /** Однократное чтение EXIF‑ориентации (до декодирования). */
-    /** EXIF-ориентация из AFD/FD — без лишнего InputStream. */
+    /** EXIF-ориентация из AFD с учётом startOffset: используем поток окна ресурса. */
     private fun readExifOrientation(afd: AssetFileDescriptor): Int = try {
-        ExifInterface(afd.fileDescriptor)
-            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        afd.createInputStream().use { ins ->
+            ExifInterface(ins).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL
+            )
+        }
     } catch (_: Exception) {
-        ExifInterface.ORIENTATION_UNDEFINED
-    }
-    /** Fallback для старого кода: читаем EXIF через AFD, а не через InputStream. */
-    private fun readExifOrientation(res: ContentResolver, uri: Uri): Int = try {
+            ExifInterface.ORIENTATION_UNDEFINED
+        }
+    /** Вариант через ContentResolver/Uri: также читаем через AFD.createInputStream(). */
+     private fun readExifOrientation(res: ContentResolver, uri: Uri): Int = try {
         res.openAssetFileDescriptor(uri, "r").use { afd ->
-            if (afd == null) ExifInterface.ORIENTATION_UNDEFINED
-            else ExifInterface(afd.fileDescriptor)
-                .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            if (afd == null) {
+                ExifInterface.ORIENTATION_UNDEFINED
+            } else {
+                    afd.createInputStream().use { ins ->
+                    ExifInterface(ins).getAttributeInt(
+                        ExifInterface.TAG_ORIENTATION,
+                        ExifInterface.ORIENTATION_NORMAL) }
+                    }
         }
     } catch (_: Exception) {
         ExifInterface.ORIENTATION_UNDEFINED

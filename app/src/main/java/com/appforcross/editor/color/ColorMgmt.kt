@@ -40,34 +40,33 @@ object ColorMgmt {
             val dst = ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
             val connector = if (srcCs == dst) null else ColorSpace.connect(srcCs, dst)
             val total = w * h * 4
-            val halfOut = HalfBufferPool.obtain(total)
+            val half = HalfBufferPool.obtain(total)
             try {
                 when (src.config) {
                     Bitmap.Config.RGBA_F16 -> {
-                        // Вход — half-float: читаем блоком и конвертируем через connector
-                        val halfIn = HalfBufferPool.obtain(total)
-                        try {
-                            src.copyPixelsToBuffer(ShortBuffer.wrap(halfIn, 0, total))
-                            var p = 0
-                            while (p < total) {
-                                val r = Half.toFloat(halfIn[p    ])
-                                val g = Half.toFloat(halfIn[p + 1])
-                                val b = Half.toFloat(halfIn[p + 2])
-                                if (connector != null) {
-                                    val v = connector.transform(r, g, b)
-                                    halfOut[p    ] = Half.toHalf(v[0])
-                                    halfOut[p + 1] = Half.toHalf(v[1])
-                                    halfOut[p + 2] = Half.toHalf(v[2])
-                                } else {
-                                    halfOut[p    ] = Half.toHalf(r)
-                                    halfOut[p + 1] = Half.toHalf(g)
-                                    halfOut[p + 2] = Half.toHalf(b)
+                        // Вход — half-float: читаем блоком в ОДИН буфер, конвертируем in-place (исключаем alias).
+                        val sb = ShortBuffer.wrap(half, 0, total)
+                        src.copyPixelsToBuffer(sb)
+                        sb.rewind()
+                        var p = 0
+                        while (p < total) {
+                            val r = Half.toFloat(half[p    ])
+                            val g = Half.toFloat(half[p + 1])
+                            val b = Half.toFloat(half[p + 2])
+                            if (connector != null) {
+                                val v = connector.transform(r, g, b)
+                                half[p    ] = Half.toHalf(v[0])
+                                half[p + 1] = Half.toHalf(v[1])
+                                half[p + 2] = Half.toHalf(v[2])
+                            } else {
+                                    // уже нужное пространство — просто переписываем (с нормализацией Half)
+                                half[p    ] = Half.toHalf(r)
+                                half[p + 1] = Half.toHalf(g)
+                                half[p + 2] = Half.toHalf(b)
                                 }
-                                halfOut[p + 3] = halfIn[p + 3] // alpha перенесём как есть
-                                p += 4
-                            }
-                        } finally {
-                            // Усушка — в внешнем finally
+                            // альфу переносим как есть
+                            // (она уже в half[p+3])
+                            p += 4
                         }
                     }
                     else -> {
@@ -82,20 +81,21 @@ object ColorMgmt {
                             val bN = Color.blue(c)  / 255f
                             if (connector != null) {
                                 val v = connector.transform(rN, gN, bN)
-                                halfOut[p++] = Half.toHalf(v[0])
-                                halfOut[p++] = Half.toHalf(v[1])
-                                halfOut[p++] = Half.toHalf(v[2])
+                                half[p++] = Half.toHalf(v[0])
+                                half[p++] = Half.toHalf(v[1])
+                                half[p++] = Half.toHalf(v[2])
                             } else {
                                 // sRGB → linear sRGB по формуле
-                                halfOut[p++] = Half.toHalf(srgbToLinear(rN))
-                                halfOut[p++] = Half.toHalf(srgbToLinear(gN))
-                                halfOut[p++] = Half.toHalf(srgbToLinear(bN))
+                                half[p++] = Half.toHalf(srgbToLinear(rN))
+                                half[p++] = Half.toHalf(srgbToLinear(gN))
+                                half[p++] = Half.toHalf(srgbToLinear(bN))
                             }
-                            halfOut[p++] = Half.toHalf(a)
+                            half[p++] = Half.toHalf(a)
                         }
                     }
                 }
-                out.copyPixelsFromBuffer(ShortBuffer.wrap(halfOut, 0, total))
+                // Пишем результат из того же буфера
+                out.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
                 Logger.i("COLOR", "gamut.convert", mapOf("src" to srcCs.name, "dst" to "Linear sRGB (F16)"))
             } finally {
                 // Всегда подрезаем пул, даже при исключениях
