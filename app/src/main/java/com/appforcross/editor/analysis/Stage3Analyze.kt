@@ -63,8 +63,8 @@ object Stage3Analyze {
         val planes = toWorkingPlanes(preview)
 
         // 2) Градиенты, Лаплас, ориентации
-        val sob = sobel(planes.luma)
-        val lap = laplacian(planes.luma)
+        val sob = sobel(planes.luma, preview.width, preview.height)
+        val lap = laplacian(planes.luma, preview.width, preview.height)
 
         // 3) Маски
         val edgeMask = buildEdgeMask(sob.mag, preview.width, preview.height)
@@ -158,6 +158,24 @@ object Stage3Analyze {
         return AnalyzeResult(preview, metrics, masks, decision)
     }
 
+    // -------- Scratch-пулы для снижения аллокаций --------
+    private object Scratch {
+        // Для морфологии
+        var boolA = BooleanArray(0)
+        var boolB = BooleanArray(0)
+        fun ensureBool(n: Int) {
+            if (boolA.size < n) boolA = BooleanArray(n)
+            if (boolB.size < n) boolB = BooleanArray(n)
+        }
+        // Для скользящих окон (монотонная очередь)
+        var dqIdx = IntArray(0)
+        var dqVal = FloatArray(0)
+        fun ensureDeque(cap: Int) {
+            if (dqIdx.size < cap) dqIdx = IntArray(cap)
+            if (dqVal.size < cap) dqVal = FloatArray(cap)
+        }
+    }
+
     // -------- Превью ----------
     private fun buildPreview(src: Bitmap, longSide: Int): Bitmap {
         val sw = src.width.toFloat()
@@ -205,13 +223,18 @@ object Stage3Analyze {
         val B = 0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_
         return floatArrayOf(L, A, B)
     }
-    private fun cbrtF(x: Float) = if (x <= 0f) 0f else x.pow(1f/3f)
+    // Знако-сохраняющий корень кубический — корректнее для OKLab (LMS могут быть < 0).
+    private fun cbrtF(x: Float): Float = when {
+        x == 0f -> 0f
+        x > 0f -> x.pow(1f/3f)
+        else -> -(-x).pow(1f/3f)
+    }
     private fun srgbToLinear(c: Float) = if (c <= 0.04045f) c / 12.92f else ((c + 0.055f) / 1.055f).pow(2.4f)
 
     // -------- Градиенты и Лаплас --------
     private data class Sobel(val gx: FloatArray, val gy: FloatArray, val mag: FloatArray)
-    private fun sobel(l: FloatArray): Sobel {
-        val n = l.size; val w = guessW(l); val h = n / w
+    private fun sobel(l: FloatArray, w: Int, h: Int): Sobel {
+        val n = l.size
         fun idx(x:Int,y:Int)=y*w+x
         val gx = FloatArray(n); val gy = FloatArray(n); val mag=FloatArray(n)
         for (y in 1 until h-1) for (x in 1 until w-1) {
@@ -226,8 +249,8 @@ object Stage3Analyze {
         }
         return Sobel(gx, gy, mag)
     }
-    private fun laplacian(l: FloatArray): FloatArray {
-        val n = l.size; val w = guessW(l); val h = n / w
+    private fun laplacian(l: FloatArray, w: Int, h: Int): FloatArray {
+        val n = l.size
         fun idx(x:Int,y:Int)=y*w+x
         val out = FloatArray(n)
         for (y in 1 until h-1) for (x in 1 until w-1) {
@@ -236,15 +259,6 @@ object Stage3Analyze {
             out[idx(x,y)] = v
         }
         return out
-    }
-    private fun guessW(arr: FloatArray): Int {
-        // Внутренний хак: ширину восстановим по делимости — нам передают только растровые данные
-        // Здесь это безопасно: вызываем только с bitmap.width*bitmap.height.
-        // Для скорости полагаем, что ширина кратна 2^k. Найдём ближайшую к sqrt(n).
-        val n = arr.size
-        val s = sqrt(n.toDouble()).roundToInt()
-        for (w in s downTo 1) if (n % w == 0) return w
-        return s
     }
 
     // -------- Маски --------
@@ -374,33 +388,35 @@ object Stage3Analyze {
     }
 
     private fun morphOpenClose(mask: BooleanArray, w:Int, h:Int, radius:Int): BooleanArray {
-        fun erode(src:BooleanArray):BooleanArray {
-            val out=BooleanArray(src.size)
-            for (y in 0 until h) for (x in 0 until w) {
-                var ok=true
-                loop@ for (dy in -radius..radius) for (dx in -radius..radius) {
-                    val xx=(x+dx).coerceIn(0,w-1); val yy=(y+dy).coerceIn(0,h-1)
-                    if (!src[yy*w+xx]) { ok=false; break@loop }
-                }
-                out[y*w+x]=ok
+        val n = w*h
+        Scratch.ensureBool(n)
+        val a = Scratch.boolA
+        val b = Scratch.boolB
+        erodeInto(mask, a, w, h, radius)
+        dilateInto(a, b, w, h, radius)     // open = erode → dilate
+        dilateInto(b, a, w, h, radius)
+        erodeInto(a, b, w, h, radius)      // close = dilate → erode
+        return b.copyOf() // итог как новый массив; внутри — без лишних аллокаций
+    }
+    private fun erodeInto(src:BooleanArray, dst:BooleanArray, w:Int, h:Int, radius:Int) {
+        for (y in 0 until h) for (x in 0 until w) {
+            var ok = true
+            loop@ for (dy in -radius..radius) for (dx in -radius..radius) {
+                val xx=(x+dx).coerceIn(0,w-1); val yy=(y+dy).coerceIn(0,h-1)
+                if (!src[yy*w+xx]) { ok=false; break@loop }
             }
-            return out
+            dst[y*w+x]=ok
         }
-        fun dilate(src:BooleanArray):BooleanArray {
-            val out=BooleanArray(src.size)
-            for (y in 0 until h) for (x in 0 until w) {
-                var ok=false
-                loop@ for (dy in -radius..radius) for (dx in -radius..radius) {
-                    val xx=(x+dx).coerceIn(0,w-1); val yy=(y+dy).coerceIn(0,h-1)
-                    if (src[yy*w+xx]) { ok=true; break@loop }
-                }
-                out[y*w+x]=ok
+    }
+    private fun dilateInto(src:BooleanArray, dst:BooleanArray, w:Int, h:Int, radius:Int) {
+        for (y in 0 until h) for (x in 0 until w) {
+            var ok = false
+            loop@ for (dy in -radius..radius) for (dx in -radius..radius) {
+                val xx=(x+dx).coerceIn(0,w-1); val yy=(y+dy).coerceIn(0,h-1)
+                if (src[yy*w+xx]) { ok=true; break@loop }
             }
-            return out
+            dst[y*w+x]=ok
         }
-        // open (erode→dilate) + close (dilate→erode)
-        val opened = dilate(erode(mask))
-        return erode(dilate(opened))
     }
 
     // -------- Метрики и утилиты --------
@@ -438,25 +454,94 @@ object Stage3Analyze {
         val i0 = floor(idx).toInt(); val i1 = ceil(idx).toInt()
         return if (i0==i1) arr[i0].toDouble() else (arr[i0]*(1.0-(idx-i0)) + arr[i1]*(idx-i0)).toDouble()
     }
+    /** Быстрый dark-channel: min по RGB → морфологическая эрозия квадратом (r) в O(N) через монотонную очередь. */
     private fun darkChannelScore(bmp: Bitmap, r:Int=7): Double {
-        val w=bmp.width; val h=bmp.height
+        val w=bmp.width; val h=bmp.height; val n = w*h
         val row = IntArray(w)
-        var sum=0.0; var n=0
+        val minRGB = FloatArray(n)
+        var idx = 0
+        // 1) локальный минимум по каналам для каждого пикселя
         for (y in 0 until h) {
             bmp.getPixels(row,0,w,0,y,w,1)
             for (x in 0 until w) {
-                var mn=1f
-                for (dy in -r..r) for (dx in -r..r) {
-                    val xx=(x+dx).coerceIn(0,w-1); val yy=(y+dy).coerceIn(0,h-1)
-                    val c = if (dx==0 && dy==0) row[x] else bmp.getPixel(xx,yy)
-                    val rf=Color.red(c)/255f; val gf=Color.green(c)/255f; val bf=Color.blue(c)/255f
-                    val m = min(rf, min(gf,bf))
-                    if (m<mn) mn=m
-                }
-                sum+=mn; n++
+                val c = row[x]
+                val mr = Color.red(c)/255f; val mg = Color.green(c)/255f; val mb = Color.blue(c)/255f
+                minRGB[idx++] = min(mr, min(mg, mb))
             }
         }
-        return (sum/n)
+        // 2) min-фильтр по окну (2r+1)x(2r+1): горизонтальный → вертикальный проход
+        val tmp = FloatArray(n)
+        minFilterHorizontal(minRGB, w, h, r, tmp)
+        val out = FloatArray(n)
+        minFilterVertical(tmp, w, h, r, out)
+        var sum = 0.0
+        for (i in 0 until n) sum += out[i].toDouble()
+        return sum / n
+    }
+    private fun minFilterHorizontal(src: FloatArray, w:Int, h:Int, r:Int, dst: FloatArray) {
+        val k = 2*r + 1
+        val extLen = w + 2*r
+        Scratch.ensureDeque(extLen)
+        val qIdx = Scratch.dqIdx; val qVal = Scratch.dqVal
+        for (y in 0 until h) {
+            var head = 0; var tail = 0
+            val off = y*w
+            val first = src[off]; val last = src[off + w - 1]
+            // Заполняем начальное окно [0..k-1] с репликацией краёв
+                        var iExt = 0
+            while (iExt < k) {
+                val v = when {
+                    iExt < r -> first
+                    iExt < r + w -> src[off + (iExt - r)]
+                    else -> last
+                }
+                while (tail > head && v <= qVal[tail - 1]) tail--
+                qVal[tail] = v; qIdx[tail] = iExt; tail++; iExt++
+            }
+            var left = 0; var outPos = 0
+            while (iExt <= extLen) {
+                dst[off + outPos] = qVal[head]; outPos++; left++
+                if (head < tail && qIdx[head] < left) head++
+                if (iExt < extLen) {
+                    val v = if (iExt < r + w) src[off + (iExt - r)] else last
+                    while (tail > head && v <= qVal[tail - 1]) tail--
+                    qVal[tail] = v; qIdx[tail] = iExt; tail++
+                }
+                iExt++
+            }
+        }
+    }
+    private fun minFilterVertical(src: FloatArray, w:Int, h:Int, r:Int, dst: FloatArray) {
+        val k = 2*r + 1
+        val extLen = h + 2*r
+        Scratch.ensureDeque(extLen)
+        val qIdx = Scratch.dqIdx; val qVal = Scratch.dqVal
+        for (x in 0 until w) {
+            var head = 0; var tail = 0
+            val first = src[x]; val last = src[(h-1)*w + x]
+            var iExt = 0
+            // окно [0..k-1] с репликацией по вертикали
+            while (iExt < k) {
+                val v = when {
+                    iExt < r -> first
+                    iExt < r + h -> src[(iExt - r)*w + x]
+                    else -> last
+                }
+                while (tail > head && v <= qVal[tail - 1]) tail--
+                qVal[tail] = v; qIdx[tail] = iExt; tail++; iExt++
+            }
+            var left = 0; var outY = 0
+            while (iExt <= extLen) {
+                dst[outY*w + x] = qVal[head]; outY++; left++
+                if (head < tail && qIdx[head] < left) head++
+                if (iExt < extLen) {
+                    val v = if (iExt < r + h) src[(iExt - r)*w + x] else last
+                    while (tail > head && v <= qVal[tail - 1]) tail--
+                    qVal[tail] = v; qIdx[tail] = iExt; tail++
+                }
+                iExt++
+            }
+        }
     }
     private fun maskToBitmap(mask: BooleanArray, w:Int, h:Int): Bitmap {
         val out = Bitmap.createBitmap(w,h,Bitmap.Config.ALPHA_8)
