@@ -39,4 +39,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.6.1")
     implementation("androidx.activity:activity-ktx:1.9.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("androidx.datastore:datastore-preferences:1.0.0")
+    // Короутины для DataStore и UI (Main dispatcher)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 }
