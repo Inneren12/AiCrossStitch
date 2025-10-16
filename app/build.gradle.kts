@@ -63,6 +63,8 @@ dependencies {
     // Dev prefs (флаги логирования/дампов)
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
+    // EXIF для поворота и метаданных
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     implementation(project(":core"))
 }
