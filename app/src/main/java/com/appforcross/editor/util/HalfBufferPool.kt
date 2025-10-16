@@ -1,7 +1,6 @@
 package com.appforcross.editor.util
 
 import java.nio.ShortBuffer
-import kotlin.math.max
 
 /**
  * Пул полуплавающих (half, 16-bit) буферов на поток.

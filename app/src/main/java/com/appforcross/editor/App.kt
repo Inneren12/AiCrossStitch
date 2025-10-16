@@ -17,22 +17,31 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicReference
 
 class App : Application() {
+    /** Долгоживущий scope уровня процесса — НЕ отменяем при background. */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Scope «переднего плана»: пересоздаётся между onStart/onStop, отменяется в onStop. */
+    private val foregroundScopeRef = AtomicReference<CoroutineScope?>(null)
+    /** Барьер на одновременные сбросы логов из разных коллбеков. */
+    private val flushMutex = Mutex()
 
     private val lifecycleObserver = object : DefaultLifecycleObserver {
-        override fun onStop(owner: LifecycleOwner) {
-            flushLogs()
-            appScope.coroutineContext.cancelChildren()
+        override fun onStart(owner: LifecycleOwner) {
+            // Создаём новый foreground-scope; предыдущий безопасно гасим.
+            foregroundScopeRef.getAndSet(CoroutineScope(SupervisorJob() + Dispatchers.Default))?.cancel()
         }
     }
 
@@ -67,7 +76,8 @@ class App : Application() {
     override fun onTerminate() {
         super.onTerminate()
         flushLogs()
-        appScope.cancel()
+        foregroundScopeRef.getAndSet(null)?.cancel()
+        appScope.cancel() // мягкое завершение долгоживущих задач
         if (BuildConfig.DEBUG) {
             Logger.shutdown()
         }
@@ -88,33 +98,40 @@ class App : Application() {
     }
 
     private fun resolveInitialLogLevel(debugFlag: Boolean): LogLevel {
-        return runBlocking {
-            withTimeoutOrNull(500) {
-                DevPrefs.isDebug(applicationContext).first()
-            }
-        }?.let { enabled ->
+        // Синхронно читаем сохранённую настройку, без таймаута.
+        return try {
+            val enabled = runBlocking { DevPrefs.isDebug(applicationContext).first() }
             if (enabled) LogLevel.DEBUG else LogLevel.INFO
-        } ?: if (debugFlag) LogLevel.DEBUG else LogLevel.INFO
+        } catch (t: Exception) {
+            if (debugFlag) LogLevel.DEBUG else LogLevel.INFO
+        }
     }
 
     private fun observeDeveloperLogPreference(initialLevel: LogLevel) {
         appScope.launch {
             DevPrefs.isDebug(applicationContext)
                 .map { enabled -> if (enabled) LogLevel.DEBUG else LogLevel.INFO }
-                .drop(1)
-                .collectLatest { level ->
-                    if (level != initialLevel) {
-                        Logger.setMinLevel(level)
-                    }
-                }
+                .distinctUntilChanged()
+                .collectLatest { level -> Logger.setMinLevel(level) }
         }
     }
 
     private fun flushLogs() {
+        // Координируем конкурентные вызовы и избегаем блокировки главного потока.
         try {
-            Logger.flush()
+            runBlocking {
+                withTimeoutOrNull(500) {
+                    flushMutex.withLock {
+                        withContext(Dispatchers.IO) { Logger.flush() }
+                    }
+                } ?: Logger.flush() // fallback: «попросить» сброс без ожидания
+            }
         } catch (t: Throwable) {
             Log.w("App", "Failed to flush logs", t)
         }
     }
+
+    /** Доступ к актуальным областям для вызывающих: исключает удержание отменённых scope. */
+    fun applicationScope(): CoroutineScope = appScope
+    fun foregroundScope(): CoroutineScope = foregroundScopeRef.get() ?: appScope
 }
