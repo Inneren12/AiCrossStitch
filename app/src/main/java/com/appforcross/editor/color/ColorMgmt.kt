@@ -11,6 +11,7 @@ import android.util.Half
 import com.appforcross.editor.util.HalfBufferPool
 import java.nio.ShortBuffer
 
+
 /** Конверсия в **linear sRGB** (RGBA_F16), далее все фильтры — в линейном RGB. */
 object ColorMgmt {
 
