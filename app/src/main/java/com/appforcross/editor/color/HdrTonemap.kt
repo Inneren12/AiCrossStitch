@@ -17,25 +17,28 @@ object HdrTonemap {
         if (!isPQ && !isHLG) return false
         val w = linearSrgbF16.width
         val h = linearSrgbF16.height
-        val px = IntArray(w)
+        val dst = ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
         if (isPQ) Logger.i("IO", "hdr.tonemap", mapOf("oetf" to "PQ", "space" to srcColorSpace.name))
         if (isHLG) Logger.i("IO", "hdr.tonemap", mapOf("oetf" to "HLG", "space" to srcColorSpace.name))
+        val row = IntArray(w)
         for (y in 0 until h) {
-            linearSrgbF16.getPixels(px, 0, w, 0, y, w, 1)
             for (x in 0 until w) {
-                val c = Color.valueOf(px[x])
+                // Читаем без потери: Bitmap.getColor() возвращает float-компоненты в пространстве bitmap (Linear sRGB).
+                val c = linearSrgbF16.getColor(x, y)
                 var r = c.red(); var g = c.green(); var b = c.blue()
-                // на входе уже linear sRGB; "hdr" здесь — переполненная яркость; нормализуем
+                // На входе уже linear sRGB; «hdr» — headroom > 1.0 после EOTF.
                 if (isPQ) {
                     r = pqToLinear(r); g = pqToLinear(g); b = pqToLinear(b)
                 } else {
-                    r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b)
-                }
-                // clamp в 0..1
-                r = r.coerceIn(0f, 1f); g = g.coerceIn(0f, 1f); b = b.coerceIn(0f, 1f)
-                px[x] = Color.valueOf(r, g, b, c.alpha()).toArgb()
+                        r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b)
+                    }
+                // Мягкое «плечо» вместо жёсткого клипа: сохраняем запас яркости для последующих шагов.
+                r = softKneeAbove1(r); g = softKneeAbove1(g); b = softKneeAbove1(b)
+                // нижняя граница 0 (отрицательные значения не несут пользы)
+                if (r < 0f) r = 0f; if (g < 0f) g = 0f; if (b < 0f) b = 0f
+                row[x] = Color.valueOf(r, g, b, c.alpha(), dst).toArgb()
             }
-            linearSrgbF16.setPixels(px, 0, w, 0, y, w, 1)
+            linearSrgbF16.setPixels(row, 0, w, 0, y, w, 1)
         }
         return true
     }
@@ -64,5 +67,16 @@ object HdrTonemap {
         val c = 0.5f - a * ln(4f * a)
         return if (v <= 0.5f) (v * v) / 3f
         else (exp((v - c) / a) + b) / 12f
+    }
+    /**
+     * Мягкое «плечо» над 1.0: сохраняет динамический диапазон, но подавляет слишком яркие пики.
+     * При headroom=3f выходная яркость асимптотически стремится к 1+headroom.
+     */
+    private fun softKneeAbove1(v: Float, headroom: Float = 3f): Float {
+        if (v <= 1f) return v
+        val e = v - 1f
+        val k = headroom
+        // e' = e / (1 + e/k); итог: 1..(1+k)
+        return 1f + e / (1f + e / k)
     }
 }

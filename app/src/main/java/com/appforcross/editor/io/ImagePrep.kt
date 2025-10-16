@@ -28,15 +28,29 @@ object ImagePrep {
     fun prepare(ctx: Context, uri: android.net.Uri, deblockThreshold: Float = 0.008f): PrepResult {
         // 1) Декод
         val dec = Decoder.decodeUri(ctx, uri)
-        // 2) В линейный sRGB (F16)
-        val linear = ColorMgmt.toLinearSrgbF16(dec.bitmap, dec.colorSpace)
+        // 2) В линейный sRGB (F16). Избегаем двойного преобразования, если уже RGBA_F16 + Linear sRGB.
+        val linear = if (android.os.Build.VERSION.SDK_INT >= 26 &&
+            dec.bitmap.config == Bitmap.Config.RGBA_F16 &&
+            dec.bitmap.colorSpace == ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
+            ) {
+            // обеспечим mutability, чтобы фильтры могли писать in-place
+            dec.bitmap.copy(Bitmap.Config.RGBA_F16, /*mutable*/ true)
+        } else {
+                ColorMgmt.toLinearSrgbF16(dec.bitmap, dec.colorSpace)
+            }
+        // освободим исходник, если он не тот же объект
+        if (dec.bitmap !== linear) {
+            try { dec.bitmap.recycle() } catch (_: Throwable) {}
+        }
         // 3) HDR тонмап при необходимости (PQ/HLG)
         val wasHdr = HdrTonemap.applyIfNeeded(linear, dec.colorSpace)
         // 4) Blockiness + deblock
         val blk = Deblocking8x8.measureBlockinessLinear(linear)
         if (blk.mean >= deblockThreshold) {
-            Deblocking8x8.weakDeblockInPlaceLinear(linear, strength = 0.5f)
-            Logger.i("FILTER", "deblock.applied", mapOf("mean" to blk.mean, "v" to blk.vertical, "h" to blk.horizontal, "strength" to 0.5))
+            // сила адаптируется к измеренной блочности (простая кривуля)
+            val strength = (blk.mean * 12f).coerceIn(0f, 0.7f)
+            Deblocking8x8.weakDeblockInPlaceLinear(linear, strength = strength)
+            Logger.i("FILTER", "deblock.applied", mapOf("mean" to blk.mean, "v" to blk.vertical, "h" to blk.horizontal, "strength" to strength))
         } else {
             Logger.i("FILTER", "deblock.skipped", mapOf("mean" to blk.mean))
         }

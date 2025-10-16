@@ -15,10 +15,15 @@ object ColorMgmt {
         val w = src.width
         val h = src.height
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.RGBA_F16)
+        if (Build.VERSION.SDK_INT >= 26) {
+            // Явно помечаем целевое пространство — линейный sRGB.
+            out.setColorSpace(ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
+        }
         if (Build.VERSION.SDK_INT >= 26 && srcCs != null) {
             val dst = ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
             val connector = ColorSpace.connect(srcCs, dst)
             val px = IntArray(w)
+            val row = IntArray(w)
             for (y in 0 until h) {
                 src.getPixels(px, 0, w, 0, y, w, 1)
                 for (x in 0 until w) {
@@ -28,13 +33,17 @@ object ColorMgmt {
                     val g = Color.green(c) / 255f
                     val b = Color.blue(c) / 255f
                     val v = connector.transform(floatArrayOf(r, g, b))
-                    out.setPixel(x, y, Color.valueOf(v[0], v[1], v[2], a).toArgb())
+                    // ВАЖНО: интерпретируем значения как **LINEAR_SRGB** при упаковке,
+                    // чтобы при записи в RGBA_F16 (Linear) не было двойной гаммы.
+                    row[x] = Color.valueOf(v[0], v[1], v[2], a, dst).toArgb()
                 }
+                out.setPixels(row, 0, w, 0, y, w, 1)
             }
             Logger.i("COLOR", "gamut.convert", mapOf("src" to srcCs.name, "dst" to "Linear sRGB (F16)"))
         } else {
             // Fallback: считаем, что sRGB, вручную в линейку
             val px = IntArray(w)
+            val row = IntArray(w)
             for (y in 0 until h) {
                 src.getPixels(px, 0, w, 0, y, w, 1)
                 for (x in 0 until w) {
@@ -43,8 +52,10 @@ object ColorMgmt {
                     val r = srgbToLinear(Color.red(c) / 255f)
                     val g = srgbToLinear(Color.green(c) / 255f)
                     val b = srgbToLinear(Color.blue(c) / 255f)
-                    out.setPixel(x, y, Color.valueOf(r, g, b, a).toArgb())
+                    // Аналогично — указываем LINEAR_SRGB при упаковке.
+                    row[x] = Color.valueOf(r, g, b, a, ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)).toArgb()
                 }
+                out.setPixels(row, 0, w, 0, y, w, 1)
             }
             Logger.w("COLOR", "gamut.assume_srgb", mapOf("dst" to "Linear sRGB (F16)"))
         }
@@ -84,5 +95,10 @@ object ColorMgmt {
         return floatArrayOf(r, g, b)
     }
 
-    private fun cbrtF(x: Float): Float = if (x <= 0f) 0f else x.pow(1f / 3f)
+    // Кубический корень с сохранением знака: для отрицательных линейных яркостей OKLab.
+    private fun cbrtF(x: Float): Float = when {
+        x == 0f -> 0f
+        x > 0f -> x.pow(1f / 3f)
+        else -> -(-x).pow(1f / 3f)
+    }
 }

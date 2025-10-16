@@ -18,29 +18,30 @@ object Deblocking8x8 {
         var vCnt = 0
         var hSum = 0.0
         var hCnt = 0
-        val px = IntArray(w)
-        // вертикальные границы (x = 8,16,...)
-        var x = 8
-        while (x < w) {
-            for (y in 0 until h) {
-                bitmap.getPixels(px, 0, w, 0, y, w, 1) // читаем строку
-                val c1 = Color.valueOf(px[x])
-                val c0 = Color.valueOf(px[x - 1])
+        val row = IntArray(w)
+        // вертикальные границы (x = 8,16,...) — читаем КАЖДУЮ строку ОДИН раз
+        for (y in 0 until h) {
+            bitmap.getPixels(row, 0, w, 0, y, w, 1)
+            var x = 8
+            while (x < w) {
+                val c1 = Color.valueOf(row[x])
+                val c0 = Color.valueOf(row[x - 1])
                 val l1 = 0.2126f * c1.red() + 0.7152f * c1.green() + 0.0722f * c1.blue()
                 val l0 = 0.2126f * c0.red() + 0.7152f * c0.green() + 0.0722f * c0.blue()
                 vSum += abs(l1 - l0).toDouble()
                 vCnt++
+                x += 8
             }
-            x += 8
         }
         // горизонтальные границы (y = 8,16,...)
         var yb = 8
         while (yb < h) {
-            bitmap.getPixels(px, 0, w, 0, yb, w, 1)
+            val cur = IntArray(w)
             val prev = IntArray(w)
+            bitmap.getPixels(cur, 0, w, 0, yb, w, 1)
             bitmap.getPixels(prev, 0, w, 0, yb - 1, w, 1)
             for (i in 0 until w) {
-                val c1 = Color.valueOf(px[i])
+                val c1 = Color.valueOf(cur[i])
                 val c0 = Color.valueOf(prev[i])
                 val l1 = 0.2126f * c1.red() + 0.7152f * c1.green() + 0.0722f * c1.blue()
                 val l0 = 0.2126f * c0.red() + 0.7152f * c0.green() + 0.0722f * c0.blue()

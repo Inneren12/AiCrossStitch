@@ -46,22 +46,28 @@ object Decoder {
             srcCs = outCs
         } else {
             // Fallback: BitmapFactory
+            val opts = BitmapFactory.Options().apply { inMutable = true }
             ctx.contentResolver.openInputStream(uri).use { ins ->
-                srcBmp = BitmapFactory.decodeStream(ins) ?: throw IllegalArgumentException("decodeStream failed")
+                srcBmp = BitmapFactory.decodeStream(ins, null, opts) ?: throw IllegalArgumentException("decodeStream failed")
             }
             srcCs = if (Build.VERSION.SDK_INT >= 26) srcBmp.colorSpace else ColorSpace.get(ColorSpace.Named.SRGB)
         }
 
-        val rotated = applyExifRotateInPlace(ctx, uri, srcBmp)
+        // Возвращаем НОВЫЙ bitmap при необходимости поворота, не мутируем исходный in-place.
+        val (outBmp, rotated) = applyExifRotate(ctx, uri, srcBmp)
+        if (rotated && outBmp !== srcBmp) {
+            // освобождаем исходный буфер, если был создан новый
+            try { srcBmp.recycle() } catch (_: Throwable) {}
+        }
         val csName = srcCs?.name ?: "unknown"
-        Logger.i("IO", "decode.done", mapOf("w" to srcBmp.width, "h" to srcBmp.height, "cs" to csName, "mime" to mime, "rotated" to rotated))
+        Logger.i("IO", "decode.done", mapOf("w" to outBmp.width, "h" to outBmp.height, "cs" to csName, "mime" to mime, "rotated" to rotated))
         return DecodedImage(
-            bitmap = srcBmp,
+            bitmap = outBmp,
             colorSpace = srcCs,
             iccConfidence = srcCs != null,
             rotated = rotated,
-            width = srcBmp.width,
-            height = srcBmp.height,
+            width = outBmp.width,
+            height = outBmp.height,
             mime = mime
         )
     }
@@ -70,28 +76,25 @@ object Decoder {
         res.getType(uri)
     } catch (_: Exception) { null }
 
-    /** Поворот по EXIF in-place, возвращает применён ли. */
-    private fun applyExifRotateInPlace(ctx: Context, uri: Uri, bmp: Bitmap): Boolean {
+    /** Поворот по EXIF. Возвращает (bitmap, rotated). Без попытки мутировать исходный bitmap. */
+    private fun applyExifRotate(ctx: Context, uri: Uri, bmp: Bitmap): Pair<Bitmap, Boolean> {
         return try {
-            val ins: InputStream = ctx.contentResolver.openInputStream(uri) ?: return false
-            val exif = ExifInterface(ins)
-            val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-            val m = Matrix()
-            when (orientation) {
-                ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
-                ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
-                ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
-                ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.preScale(-1f, 1f)
-                ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.preScale(1f, -1f)
-                else -> { ins.close(); return false }
+            ctx.contentResolver.openInputStream(uri).use { ins ->
+                if (ins == null) return Pair(bmp, false)
+                val exif = ExifInterface(ins)
+                val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                val m = Matrix()
+                when (orientation) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
+                    ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
+                    ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
+                    ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.preScale(-1f, 1f)
+                    ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.preScale(1f, -1f)
+                    else -> return Pair(bmp, false)
+                }
+                val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                Pair(rotated, true)
             }
-            val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-            // заменить содержимое (in-place семантика для вызывающего)
-            val canvas = Canvas(bmp)
-            canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-            canvas.drawBitmap(rotated, 0f, 0f, null)
-            ins.close()
-            true
-        } catch (_: Exception) { false }
+        } catch (_: Exception) { Pair(bmp, false) }
     }
 }

@@ -3,13 +3,23 @@ package com.appforcross.editor.filters
 import android.graphics.Bitmap
 import android.graphics.Color
 import com.appforcross.editor.logging.Logger
-import kotlin.math.abs
-import kotlin.math.exp
-import kotlin.math.max
-import kotlin.math.sqrt
+import kotlin.math.*
 
 /** Подавление светлых ореолов (смартфонный шарп): DoG вдоль кромок + мягкий clamp. */
 object HaloRemoval {
+
+    // Рабочие буферы — переиспользуем через ThreadLocal, чтобы не аллоцировать на каждый вызов
+    private class Workspace {
+        var tmp = FloatArray(0)
+        var bufA = FloatArray(0)
+        var bufB = FloatArray(0)
+        fun ensure(cap: Int) {
+            if (tmp.size < cap) tmp = FloatArray(cap)
+            if (bufA.size < cap) bufA = FloatArray(cap)
+            if (bufB.size < cap) bufB = FloatArray(cap)
+        }
+    }
+    private val wsLocal = ThreadLocal.withInitial { Workspace() }
 
     /** Возвращает оценку halo и применяет исправление in-place. */
     fun removeHalosInPlaceLinear(bitmap: Bitmap, amount: Float = 0.25f, radiusPx: Int = 2): Float {
@@ -25,26 +35,23 @@ object HaloRemoval {
             val c = Color.valueOf(src[i])
             L[i] = 0.2126f * c.red() + 0.7152f * c.green() + 0.0722f * c.blue()
         }
-        // 2) DoG: blur(r) - blur(2r)
-        val blurSmall = gaussianBlur(L, w, h, radiusPx)
-        val blurLarge = gaussianBlur(L, w, h, radiusPx * 2)
-        val dog = FloatArray(w * h)
+
+        // 2) DoG: blur(r) - blur(1.6*r) — ближе к каноническому DoG
+        val ws = wsLocal.get().apply { ensure(w * h) }
+        gaussianBlurInto(L, w, h, radiusPx, ws.bufA, ws) // small
+        val largeR = max(1, (radiusPx * 1.6f).roundToInt())
+        gaussianBlurInto(L, w, h, largeR, ws.bufB, ws)   // large
         var haloScore = 0.0
-        for (i in dog.indices) {
-            val v = blurSmall[i] - blurLarge[i]
-            dog[i] = v
-            haloScore += kotlin.math.abs(v)
-        }
-        haloScore /= dog.size
 
         // 3) Снижаем положительные ореолы (светлые каймы) около кромок.
         //    Простая эвристика: если DoG>>0 — уменьшаем L; если DoG<<0 — почти не трогаем.
+        var idx = 0
         for (y in 0 until h) {
             for (x in 0 until w) {
-                val idx = y * w + x
                 val c = Color.valueOf(src[idx])
                 val l = L[idx]
-                val d = dog[idx]
+                val d = ws.bufA[idx] - ws.bufB[idx]
+                haloScore += abs(d.toDouble())
                 val k = if (d > 0f) amount else amount * 0.05f
                 val nl = (l - k * d).coerceIn(0f, 1f)
                 // Пропорционально меняем RGB (сохраняя оттенок)
@@ -53,19 +60,23 @@ object HaloRemoval {
                 val ng = (c.green() * scale).coerceIn(0f, 1f)
                 val nb = (c.blue() * scale).coerceIn(0f, 1f)
                 dst[idx] = Color.valueOf(nr, ng, nb, c.alpha()).toArgb()
+                idx++
             }
         }
+        haloScore /= (w * h).toDouble()
         bitmap.setPixels(dst, 0, w, 0, 0, w, h)
-        Logger.i("FILTER", "halo.removed", mapOf("score" to haloScore, "amount" to amount, "radius" to radiusPx))
+        Logger.i("FILTER", "halo.removed", mapOf("score" to haloScore, "amount" to amount, "radius" to radiusPx, "radiusLarge" to largeR))
         return haloScore.toFloat()
     }
 
-    // Простой сепарабельный гаусс
-    private fun gaussianBlur(src: FloatArray, w: Int, h: Int, radius: Int): FloatArray {
+    // Простой сепарабельный гаусс с выводом в предоставленный буфер (для реюза памяти)
+    private fun gaussianBlurInto(src: FloatArray, w: Int, h: Int, radius: Int, out: FloatArray, ws: Workspace) {
         val sigma = max(1.0, radius.toDouble() / 2.0).toFloat()
         val k = kernel1D(sigma, radius)
-        val tmp = FloatArray(w * h)
-        val out = FloatArray(w * h)
+        val tmp = ws.tmp
+        // гарантируем буфер
+        if (tmp.size < w * h) ws.tmp = FloatArray(w * h)
+        val tmpBuf = ws.tmp
         // X
         for (y in 0 until h) {
             val row = y * w
@@ -77,7 +88,7 @@ object HaloRemoval {
                     acc += src[row + xx] * wgt
                     norm += wgt
                 }
-                tmp[row + x] = acc / norm
+                tmpBuf[row + x] = acc / norm
             }
         }
         // Y
@@ -87,13 +98,12 @@ object HaloRemoval {
                 for (dy in -radius..radius) {
                     val yy = (y + dy).coerceIn(0, h - 1)
                     val wgt = k[dy + radius]
-                    acc += tmp[yy * w + x] * wgt
+                    acc += tmpBuf[yy * w + x] * wgt
                     norm += wgt
                 }
                 out[y * w + x] = acc / norm
             }
         }
-        return out
     }
 
     private fun kernel1D(sigma: Float, radius: Int): FloatArray {

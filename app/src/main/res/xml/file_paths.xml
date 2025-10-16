@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+    <paths xmlns:android="http://schemas.android.com/apk/res/android">
+        <!-- Разрешаем отдавать файлы из кэша и внутреннего хранилища приложения -->
+        <cache-path name="cache" path="." />
+        <files-path name="files" path="." />
+        <!-- опционально: внешний кэш, если понадобится -->
+        <external-cache-path name="external_cache" path="." />
+    </paths>

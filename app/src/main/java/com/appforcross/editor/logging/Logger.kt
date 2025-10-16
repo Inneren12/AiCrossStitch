@@ -8,6 +8,9 @@ import java.io.IOException
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 
 /** Структурный логгер: JSONL в файл + (dev) в Logcat. Однопоточная запись. */
 object Logger {
@@ -19,6 +22,10 @@ object Logger {
         Thread(r, "logger-writer").apply { isDaemon = true }
     }
     private var logcatDebug = false
+    /** Единый писатель на сеанс (оптимизация вместо открытия/закрытия на каждую запись). */
+    @Volatile private var writer: BufferedWriter? = null
+    /** Блокировка на время экспорта (исключает параллельную запись в ZIP). */
+    private val writeLock = ReentrantLock(true)
 
     @Synchronized
     fun init(sessionDir: File, sessionId: String, minLevel: LogLevel, logcatDebugEnabled: Boolean) {
@@ -29,6 +36,8 @@ object Logger {
         sessionIdRef.set(sessionId)
         logcatDebug = logcatDebugEnabled
         running.set(true)
+        // Открываем единый буферизированный писатель (append).
+        writer = BufferedWriter(FileWriter(f, true))
         i("IO", "logger.init", mapOf("path" to f.absolutePath, "minLevel" to minLevel.name, "sessionId" to sessionId))
     }
 
@@ -37,7 +46,27 @@ object Logger {
         i("IO", "logger.level.update", mapOf("minLevel" to level.name))
     }
 
-    fun shutdown() { running.set(false) }
+    /** Корректное завершение: останавливаем приём, сбрасываем и закрываем писатель. */
+    /**
+    +     * Принудительное «осушение» очереди записи — полезно перед экспортом диагностики.
+    +     * Реализовано барьером: пустая задача, которую дожидаемся, гарантирует выполнение всех предыдущих.
+    +     */
+    fun flush(timeoutMs: Long = 5_000) {
+        if (!running.get()) return
+        try {
+            val f = writerExecutor.submit {}
+            f.get(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {
+            // игнорируем таймаут/остановку — в худшем случае часть записей не успела дойти
+        }
+    }
+
+    /** Корректное завершение: останавливаем приём и дожидаемся слива очереди. */
+    fun shutdown() {
+        running.set(false)
+        flush(2_000)
+        writerExecutor.shutdown()
+    }
 
     fun d(cat: String, msg: String, data: Map<String, Any?> = emptyMap(), req: String? = null, tile: String? = null) =
         log(LogLevel.DEBUG, cat, msg, data, req, tile)
@@ -64,17 +93,44 @@ object Logger {
                 LogLevel.ERROR -> Log.e(tag, msg)
             }
         }
-        val file = fileRef.get() ?: return
+        if (fileRef.get() == null) return
         if (!running.get()) return
-        writerExecutor.execute {
-            try {
-                BufferedWriter(FileWriter(file, true)).use {
-                    it.write(line)
-                    it.flush()
+        try {
+            writerExecutor.execute {
+                try {
+                    BufferedWriter(FileWriter(file, true)).use {
+                        it.write(line)
+                        it.flush()
+                    }
+                } catch (io: IOException) {
+                    Log.e("AiX/Logger", "write fail: ${io.message}")
                 }
-            } catch (io: IOException) {
-                Log.e("AiX/Logger", "write fail: ${io.message}")
             }
+        } catch (_: RejectedExecutionException) {
+            // очередь уже закрыта (shutdown) — безопасно игнорируем
         }
     }
+
+    /**
+     * Временная пауза записи на время критических операций (например, упаковка ZIP).
+     * Удерживает блокировку до вызова [resumeWrites].
+     */
+    fun pauseWrites() {
+        writeLock.lock()
+        try {
+            writer?.flush()
+        } catch (_: IOException) {
+        }
+    }
+
+    /** Возобновляет запись после [pauseWrites]. */
+    fun resumeWrites() {
+        try {
+            writer?.flush()
+        } catch (_: IOException) {
+        } finally {
+            writeLock.unlock()
+        }
+    }
+
 }
