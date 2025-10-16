@@ -7,6 +7,7 @@ import java.nio.ShortBuffer
 import android.graphics.ColorSpace
 import com.appforcross.editor.logging.Logger
 import kotlin.math.*
+import com.appforcross.editor.util.HalfBufferPool
 
 /** Простейший EOTF для BT.2100 **PQ** и **HLG** → линейный (норм. до [0..1]). */
 object HdrTonemap {
@@ -20,26 +21,41 @@ object HdrTonemap {
         if (!isPQ && !isHLG) return false
         val w = linearSrgbF16.width
         val h = linearSrgbF16.height
-        // Пишем сразу в half‑float буфер, исключая 8‑битную квантизацию.
-        val half = ShortArray(w * h * 4)
+        // === Буферизованное чтение/запись F16 ===
+        val total = w * h * 4
+        val half = HalfBufferPool.obtain(total)
+        // Считываем сырые half‑значения линейного sRGB (RGBA_F16) без getColor.
+        val inBuf: ShortBuffer = ShortBuffer.wrap(half, 0, total)
+        linearSrgbF16.copyPixelsToBuffer(inBuf)
         if (isPQ) Logger.i("IO", "hdr.tonemap", mapOf("oetf" to "PQ", "space" to srcColorSpace.name))
         if (isHLG) Logger.i("IO", "hdr.tonemap", mapOf("oetf" to "HLG", "space" to srcColorSpace.name))
-        var p = 0
-        for (y in 0 until h) {
-            for (x in 0 until w) {
-                val c = linearSrgbF16.getColor(x, y) // Linear sRGB
-                var r = c.red(); var g = c.green(); var b = c.blue()
-                if (isPQ) { r = pqToLinear(r); g = pqToLinear(g); b = pqToLinear(b) }
-                else      { r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b) }
-                r = softKneeAbove1(r); g = softKneeAbove1(g); b = softKneeAbove1(b)
-                if (r < 0f) r = 0f; if (g < 0f) g = 0f; if (b < 0f) b = 0f
-                half[p++] = Half.toHalf(r)
-                half[p++] = Half.toHalf(g)
-                half[p++] = Half.toHalf(b)
-                half[p++] = Half.toHalf(c.alpha())
-            }
+        var headroomMax = 0f
+        // Обрабатываем in-place в массиве half (RGBA)
+        var i = 0
+        while (i < total) {
+            // R,G,B,A — в half
+            var r = Half.toFloat(half[i])
+            var g = Half.toFloat(half[i + 1])
+            var b = Half.toFloat(half[i + 2])
+            val a = Half.toFloat(half[i + 3])
+            // EOTF
+            if (isPQ) { r = pqToLinear(r); g = pqToLinear(g); b = pqToLinear(b) }
+            else      { r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b) }
+            // Телеметрия по "запасу над 1.0"
+            headroomMax = max(headroomMax, max(r, max(g, b)) - 1f)
+            // Мягкое плечо и клип снизу
+            r = max(0f, softKneeAbove1(r)); g = max(0f, softKneeAbove1(g)); b = max(0f, softKneeAbove1(b))
+            // Запись обратно в half
+            half[i    ] = Half.toHalf(r)
+            half[i + 1] = Half.toHalf(g)
+            half[i + 2] = Half.toHalf(b)
+            half[i + 3] = Half.toHalf(a)
+            i += 4
         }
-        linearSrgbF16.copyPixelsFromBuffer(ShortBuffer.wrap(half))
+        // Записываем обратно без 8‑битной квантизации
+        linearSrgbF16.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
+        HalfBufferPool.trimIfOversized()
+        Logger.i("IO", "hdr.tonemap.done", mapOf("space" to srcColorSpace.name, "headroomMax" to headroomMax))
         return true
     }
 

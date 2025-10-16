@@ -21,11 +21,17 @@ object ImagePrep {
         val haloScore: Float
     )
 
-    /**
-     * Основной входной шаг пайплайна.
-     * @param deblockThreshold порог блокинга (средний) для включения сглаживания, по умолчанию 0.008
+    /** * Основной входной шаг пайплайна.
+     * @param debug необязательный коллбек телеметрии (настройка на устройстве)
+     * @param recycleDecoded если true и входной bitmap эксклюзивен (см. Decoder), он будет освобождён
      */
-    fun prepare(ctx: Context, uri: android.net.Uri, deblockThreshold: Float = 0.008f): PrepResult {
+    fun prepare(
+        ctx: Context,
+        uri: android.net.Uri,
+        deblockThreshold: Float = 0.008f,
+        debug: ((Map<String, Any>) -> Unit)? = null,
+        recycleDecoded: Boolean = true
+    ): PrepResult {
         // 1) Декод
         val dec = Decoder.decodeUri(ctx, uri)
         // 2) В линейный sRGB (F16). Избегаем двойного преобразования, если уже RGBA_F16 + Linear sRGB.
@@ -38,8 +44,8 @@ object ImagePrep {
         } else {
                 ColorMgmt.toLinearSrgbF16(dec.bitmap, dec.colorSpace)
             }
-        // освободим исходник, если он не тот же объект
-        if (dec.bitmap !== linear) {
+        // Освобождаем исходник ТОЛЬКО если он эксклюзивный и это разрешено политикой.
+        if (dec.bitmap !== linear && dec.exclusive && recycleDecoded) {
             try { dec.bitmap.recycle() } catch (_: Throwable) {}
         }
         // 3) HDR тонмап при необходимости (PQ/HLG)
@@ -56,6 +62,18 @@ object ImagePrep {
         }
         // 5) Halo removal
         val halo = HaloRemoval.removeHalosInPlaceLinear(linear, amount = 0.25f, radiusPx = 2)
+        // Отладочная телеметрия для настройки на устройстве
+        debug?.invoke(
+            mapOf(
+                "srcCs" to (dec.colorSpace?.name ?: "unknown"),
+                "iccConfidence" to dec.iccConfidence,
+                "hdrApplied" to wasHdr,
+                "blockinessV" to blk.vertical,
+                "blockinessH" to blk.horizontal,
+                "blockinessMean" to blk.mean,
+                "haloScore" to halo
+            )
+        )
         return PrepResult(
             linearF16 = linear,
             srcColorSpace = dec.colorSpace,

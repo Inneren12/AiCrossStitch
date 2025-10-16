@@ -8,6 +8,7 @@ import android.os.Build
 import com.appforcross.editor.logging.Logger
 import kotlin.math.*
 import android.util.Half
+import com.appforcross.editor.util.HalfBufferPool
 import java.nio.ShortBuffer
 
 /** Конверсия в **linear sRGB** (RGBA_F16), далее все фильтры — в линейном RGB. */
@@ -27,7 +28,9 @@ object ColorMgmt {
             // Полностью плавающая обработка: читаем float-компоненты и пишем half‑float без 8‑бит квантизации.
             val dst = ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
             val connector = ColorSpace.connect(srcCs, dst)
-            val half = ShortArray(w * h * 4)
+            // Reuse: большой временный буфер берём из пула.
+            val total = w * h * 4
+            val half = HalfBufferPool.obtain(total)
             var p = 0
             for (y in 0 until h) {
                 for (x in 0 until w) {
@@ -39,12 +42,15 @@ object ColorMgmt {
                     half[p++] = Half.toHalf(col.alpha())
                 }
             }
-            out.copyPixelsFromBuffer(ShortBuffer.wrap(half))
+            out.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
+            // Не удерживаем гигантские буферы в долгоживущих потоках.
+            HalfBufferPool.trimIfOversized()
             Logger.i("COLOR", "gamut.convert", mapOf("src" to srcCs.name, "dst" to "Linear sRGB (F16)"))
         } else {
             // Fallback (<26 или нет ColorSpace): считаем, что вход — sRGB 8‑бит и переводим в линейку.
             val px = IntArray(w)
-            val half = ShortArray(w * h * 4)
+            val total = w * h * 4
+            val half = HalfBufferPool.obtain(total)
             var p = 0
             for (y in 0 until h) {
                 src.getPixels(px, 0, w, 0, y, w, 1)
@@ -60,7 +66,9 @@ object ColorMgmt {
                     half[p++] = Half.toHalf(a)
                 }
             }
-            out.copyPixelsFromBuffer(ShortBuffer.wrap(half))
+            out.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
+            // Подрезка слишком больших буферов.
+            HalfBufferPool.trimIfOversized()
             Logger.w("COLOR", "gamut.assume_srgb", mapOf("dst" to "Linear sRGB (F16)"))
         }
         return out

@@ -35,9 +35,10 @@ object Deblocking8x8 {
         }
         // горизонтальные границы (y = 8,16,...)
         var yb = 8
+        // Reuse: один раз создаём буферы строк и переиспользуем.
+        val cur = IntArray(w)
+        val prev = IntArray(w)
         while (yb < h) {
-            val cur = IntArray(w)
-            val prev = IntArray(w)
             bitmap.getPixels(cur, 0, w, 0, yb, w, 1)
             bitmap.getPixels(prev, 0, w, 0, yb - 1, w, 1)
             for (i in 0 until w) {
@@ -79,9 +80,10 @@ object Deblocking8x8 {
         }
         // горизонты
         var yb = 8
+        // Reuse: два буфера строк на всё выполнение вместо аллокации на каждую границу.
+        val rowA = IntArray(w)
+        val rowB = IntArray(w)
         while (yb < h) {
-            val rowA = IntArray(w)
-            val rowB = IntArray(w)
             bitmap.getPixels(rowA, 0, w, 0, yb - 1, w, 1)
             bitmap.getPixels(rowB, 0, w, 0, yb, w, 1)
             for (i in 0 until w) {

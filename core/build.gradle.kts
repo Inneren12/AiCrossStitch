@@ -9,7 +9,7 @@ plugins {
 android {
     namespace = "com.appforcross.core"
     compileSdk = 35
-    defaultConfig { minSdk = 29 }
+    defaultConfig { minSdk = 31 }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

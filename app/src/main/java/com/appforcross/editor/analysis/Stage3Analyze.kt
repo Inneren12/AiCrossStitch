@@ -3,6 +3,8 @@ package com.appforcross.editor.analysis
 import android.content.Context
 import android.graphics.*
 import android.net.Uri
+import android.os.Build
+import androidx.annotation.RequiresApi
 import com.appforcross.editor.io.Decoder
 import com.appforcross.editor.logging.Logger
 import com.appforcross.editor.diagnostics.DiagnosticsManager
@@ -53,6 +55,7 @@ object Stage3Analyze {
     private const val PREVIEW_LONG_SIDE = 1024
 
     /** Точка входа: строим превью, считаем маски и метрики, выдаём классификацию. */
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun run(ctx: Context, uri: Uri): AnalyzeResult {
         // 0) Декодим исходник (с EXIF-поворотом) и строим превью ≤1024
         val dec = Decoder.decodeUri(ctx, uri)
@@ -145,21 +148,22 @@ object Stage3Analyze {
         // 6) Сохраняем маски в diag/ (удобно для проверки)
         try {
             DiagnosticsManager.currentSessionDir(ctx)?.let { dir ->
-                savePng(masks.edge, File(dir, "mask_edge.png"))
-                savePng(masks.flat, File(dir, "mask_flat.png"))
-                savePng(masks.hiTexFine, File(dir, "mask_hitex_fine.png"))
-                savePng(masks.hiTexCoarse, File(dir, "mask_hitex_coarse.png"))
-                savePng(masks.skin, File(dir, "mask_skin.png"))
-                savePng(masks.sky, File(dir, "mask_sky.png"))
-                savePng(preview, File(dir, "preview.png"))
+                val sdir = File(dir, "stage3").apply { mkdirs() }
+                savePng(masks.edge, File(sdir, "mask_edge.png"))
+                savePng(masks.flat, File(sdir, "mask_flat.png"))
+                savePng(masks.hiTexFine, File(sdir, "mask_hitex_fine.png"))
+                savePng(masks.hiTexCoarse, File(sdir, "mask_hitex_coarse.png"))
+                savePng(masks.skin, File(sdir, "mask_skin.png"))
+                savePng(masks.sky, File(sdir, "mask_sky.png"))
+                savePng(preview, File(sdir, "preview.png"))
             }
         } catch (_: Exception) { /* diag-сохранение опционально */ }
 
         return AnalyzeResult(preview, metrics, masks, decision)
     }
 
-    // -------- Scratch-пулы для снижения аллокаций --------
-    private object Scratch {
+    // -------- Scratch-пулы для снижения аллокаций (ThreadLocal) --------
+    private class Scratch {
         // Для морфологии
         var boolA = BooleanArray(0)
         var boolB = BooleanArray(0)
@@ -175,7 +179,8 @@ object Stage3Analyze {
             if (dqVal.size < cap) dqVal = FloatArray(cap)
         }
     }
-
+    private val scratchTL = ThreadLocal.withInitial { Scratch() }
+    private fun scratch(): Scratch = scratchTL.get()
     // -------- Превью ----------
     private fun buildPreview(src: Bitmap, longSide: Int): Bitmap {
         val sw = src.width.toFloat()
@@ -389,9 +394,10 @@ object Stage3Analyze {
 
     private fun morphOpenClose(mask: BooleanArray, w:Int, h:Int, radius:Int): BooleanArray {
         val n = w*h
-        Scratch.ensureBool(n)
-        val a = Scratch.boolA
-        val b = Scratch.boolB
+        val s = scratch()
+        s.ensureBool(n)
+        val a = s.boolA
+        val b = s.boolB
         erodeInto(mask, a, w, h, radius)
         dilateInto(a, b, w, h, radius)     // open = erode → dilate
         dilateInto(b, a, w, h, radius)
@@ -471,18 +477,19 @@ object Stage3Analyze {
         }
         // 2) min-фильтр по окну (2r+1)x(2r+1): горизонтальный → вертикальный проход
         val tmp = FloatArray(n)
-        minFilterHorizontal(minRGB, w, h, r, tmp)
+        val s = scratch()
+        minFilterHorizontal(minRGB, w, h, r, tmp, s)
         val out = FloatArray(n)
-        minFilterVertical(tmp, w, h, r, out)
+        minFilterVertical(tmp, w, h, r, out, s)
         var sum = 0.0
         for (i in 0 until n) sum += out[i].toDouble()
         return sum / n
     }
-    private fun minFilterHorizontal(src: FloatArray, w:Int, h:Int, r:Int, dst: FloatArray) {
+    private fun minFilterHorizontal(src: FloatArray, w:Int, h:Int, r:Int, dst: FloatArray, s: Scratch) {
         val k = 2*r + 1
         val extLen = w + 2*r
-        Scratch.ensureDeque(extLen)
-        val qIdx = Scratch.dqIdx; val qVal = Scratch.dqVal
+        s.ensureDeque(extLen)
+        val qIdx = s.dqIdx; val qVal = s.dqVal
         for (y in 0 until h) {
             var head = 0; var tail = 0
             val off = y*w
@@ -511,11 +518,11 @@ object Stage3Analyze {
             }
         }
     }
-    private fun minFilterVertical(src: FloatArray, w:Int, h:Int, r:Int, dst: FloatArray) {
+    private fun minFilterVertical(src: FloatArray, w:Int, h:Int, r:Int, dst: FloatArray, s: Scratch) {
         val k = 2*r + 1
         val extLen = h + 2*r
-        Scratch.ensureDeque(extLen)
-        val qIdx = Scratch.dqIdx; val qVal = Scratch.dqVal
+        s.ensureDeque(extLen)
+        val qIdx = s.dqIdx; val qVal = s.dqVal
         for (x in 0 until w) {
             var head = 0; var tail = 0
             val first = src[x]; val last = src[(h-1)*w + x]

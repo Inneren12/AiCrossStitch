@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.*
 import android.net.Uri
 import android.os.Build
+import androidx.annotation.RequiresApi
 import androidx.exifinterface.media.ExifInterface
 import com.appforcross.editor.logging.Logger
 import java.io.InputStream
@@ -16,11 +17,13 @@ data class DecodedImage(
         val rotated: Boolean,               // применён поворот по EXIF
         val width: Int,
         val height: Int,
-        val mime: String?
+        val mime: String?,
+        val exclusive: Boolean
     )
 
 object Decoder {
 
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun decodeUri(ctx: Context, uri: Uri): DecodedImage {
         Logger.i("IO", "decode.start", mapOf("uri" to uri.toString()))
         val mime = safeMime(ctx.contentResolver, uri)
@@ -61,14 +64,22 @@ object Decoder {
         }
         val csName = srcCs?.name ?: "unknown"
         Logger.i("IO", "decode.done", mapOf("w" to outBmp.width, "h" to outBmp.height, "cs" to csName, "mime" to mime, "rotated" to rotated))
+        // Повышаем "уверенность" только если пространство не тривиальное sRGB/Linear sRGB.
+        val iccConf = when (srcCs) {
+            null -> false
+            ColorSpace.get(ColorSpace.Named.SRGB),
+            ColorSpace.get(ColorSpace.Named.LINEAR_SRGB) -> false
+            else -> true
+        }
         return DecodedImage(
             bitmap = outBmp,
             colorSpace = srcCs,
-            iccConfidence = srcCs != null,
+            iccConfidence = iccConf,
             rotated = rotated,
             width = outBmp.width,
             height = outBmp.height,
-            mime = mime
+            mime = mime,
+            exclusive = true
         )
     }
 
