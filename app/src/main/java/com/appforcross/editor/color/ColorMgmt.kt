@@ -32,11 +32,15 @@ object ColorMgmt {
             // Reuse: большой временный буфер берём из пула.
             val total = w * h * 4
             val half = HalfBufferPool.obtain(total)
+            val rgb = FloatArray(3) // переиспользуемый буфер для входных компонент
             var p = 0
             for (y in 0 until h) {
                 for (x in 0 until w) {
                     val col = src.getColor(x, y) // float-компоненты в srcCs
-                    val v = connector.transform(floatArrayOf(col.red(), col.green(), col.blue()))
+                    rgb[0] = col.red()
+                    rgb[1] = col.green()
+                    rgb[2] = col.blue()
+                    val v = connector.transform(rgb)
                     half[p++] = Half.toHalf(v[0])
                     half[p++] = Half.toHalf(v[1])
                     half[p++] = Half.toHalf(v[2])

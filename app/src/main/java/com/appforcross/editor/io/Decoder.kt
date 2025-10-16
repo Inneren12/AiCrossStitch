@@ -5,7 +5,6 @@ import android.content.Context
 import android.graphics.*
 import android.net.Uri
 import android.os.Build
-import androidx.annotation.RequiresApi
 import androidx.exifinterface.media.ExifInterface
 import com.appforcross.editor.logging.Logger
 import java.io.InputStream
@@ -23,10 +22,13 @@ data class DecodedImage(
 
 object Decoder {
 
-    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+    private const val MAX_DEC_MP = 16_000_000 // ~16 Мп ограничение по памяти для декода
+
     fun decodeUri(ctx: Context, uri: Uri): DecodedImage {
         Logger.i("IO", "decode.start", mapOf("uri" to uri.toString()))
         val mime = safeMime(ctx.contentResolver, uri)
+        // Читаем EXIF‑ориентацию ЗАРАНЕЕ (без повторного открытия после декода).
+        val exifOrientation = readExifOrientation(ctx.contentResolver, uri)
         val srcBmp: Bitmap
         val srcCs: ColorSpace?
 
@@ -41,8 +43,17 @@ object Decoder {
                 decoder.isMutableRequired = true
                 decoder.setTargetColorSpace(cs ?: ColorSpace.get(ColorSpace.Named.SRGB))
                 decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_LOW_RAM
+                // Ограничаем размер декода для очень больших исходников
+                val w0 = info.size.width
+                val h0 = info.size.height
+                val mp = 1L * w0 * h0
+                if (mp > MAX_DEC_MP) {
+                    val scale = kotlin.math.sqrt(MAX_DEC_MP.toDouble() / mp.toDouble())
+                    val tw = kotlin.math.max(1, (w0 * scale).toInt())
+                    val th = kotlin.math.max(1, (h0 * scale).toInt())
+                    decoder.setTargetSize(tw, th)
+                }
                 if (cs?.isWideGamut == true || cs == ColorSpace.get(ColorSpace.Named.BT2020_HLG) || cs == ColorSpace.get(ColorSpace.Named.BT2020_PQ)) {
-                    decoder.setTargetSize(info.size.width, info.size.height)
                     decoder.setTargetColorSpace(cs)
                 }
             }
@@ -57,7 +68,7 @@ object Decoder {
         }
 
         // Возвращаем НОВЫЙ bitmap при необходимости поворота, не мутируем исходный in-place.
-        val (outBmp, rotated) = applyExifRotate(ctx, uri, srcBmp)
+        val (outBmp, rotated) = applyExifRotate(exifOrientation, srcBmp)
         if (rotated && outBmp !== srcBmp) {
             // освобождаем исходный буфер, если был создан новый
             try { srcBmp.recycle() } catch (_: Throwable) {}
@@ -79,7 +90,8 @@ object Decoder {
             width = outBmp.width,
             height = outBmp.height,
             mime = mime,
-            exclusive = true
+            // Эксклюзивность приближаем по мутируемости результата декода/поворота.
+            exclusive = outBmp.isMutable
         )
     }
 
@@ -87,25 +99,28 @@ object Decoder {
         res.getType(uri)
     } catch (_: Exception) { null }
 
-    /** Поворот по EXIF. Возвращает (bitmap, rotated). Без попытки мутировать исходный bitmap. */
-    private fun applyExifRotate(ctx: Context, uri: Uri, bmp: Bitmap): Pair<Bitmap, Boolean> {
-        return try {
-            ctx.contentResolver.openInputStream(uri).use { ins ->
-                if (ins == null) return Pair(bmp, false)
-                val exif = ExifInterface(ins)
-                val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-                val m = Matrix()
-                when (orientation) {
-                    ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
-                    ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
-                    ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
-                    ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.preScale(-1f, 1f)
-                    ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.preScale(1f, -1f)
-                    else -> return Pair(bmp, false)
-                }
-                val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-                Pair(rotated, true)
-            }
-        } catch (_: Exception) { Pair(bmp, false) }
+    /** Поворот по EXIF (уже известна ориентация). Возвращает (bitmap, rotated). */
+    private fun applyExifRotate(orientation: Int, bmp: Bitmap): Pair<Bitmap, Boolean> {
+        val m = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90  -> m.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.preScale(-1f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL   -> m.preScale(1f, -1f)
+            else -> return Pair(bmp, false)
+        }
+        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+        return Pair(rotated, true)
+    }
+
+    /** Однократное чтение EXIF‑ориентации (до декодирования). */
+    private fun readExifOrientation(res: ContentResolver, uri: Uri): Int = try {
+        res.openInputStream(uri).use { ins ->
+            if (ins == null) ExifInterface.ORIENTATION_UNDEFINED
+            else ExifInterface(ins).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        }
+    } catch (_: Exception) {
+        ExifInterface.ORIENTATION_UNDEFINED
     }
 }

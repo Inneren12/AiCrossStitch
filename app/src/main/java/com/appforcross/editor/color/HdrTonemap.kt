@@ -14,7 +14,11 @@ object HdrTonemap {
 
     /** Если cs == BT2020_PQ или BT2020_HLG — применяет EOTF к **linear sRGB F16** bitmap. */
     @SuppressLint("NewApi", "HalfFloat")
-    fun applyIfNeeded(linearSrgbF16: Bitmap, srcColorSpace: ColorSpace?): Boolean {
+    fun applyIfNeeded(
+        linearSrgbF16: Bitmap,
+        srcColorSpace: ColorSpace?,
+        headroom: Float = 3f
+    ): Boolean {
         if (srcColorSpace == null) return false
         val isPQ = srcColorSpace == ColorSpace.get(ColorSpace.Named.BT2020_PQ)
         val isHLG = srcColorSpace == ColorSpace.get(ColorSpace.Named.BT2020_HLG)
@@ -37,15 +41,15 @@ object HdrTonemap {
             var r = Half.toFloat(half[i])
             var g = Half.toFloat(half[i + 1])
             var b = Half.toFloat(half[i + 2])
-            val a = Half.toFloat(half[i + 3])
+            val a = Half.toFloat(half[i + 3]).coerceIn(0f, 1f)
             // EOTF
             if (isPQ) { r = pqToLinear(r); g = pqToLinear(g); b = pqToLinear(b) }
             else      { r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b) }
             // Телеметрия по "запасу над 1.0"
             headroomMax = max(headroomMax, max(r, max(g, b)) - 1f)
             // Мягкое плечо и клип снизу
-            r = max(0f, softKneeAbove1(r)); g = max(0f, softKneeAbove1(g)); b = max(0f, softKneeAbove1(b))
-            // Запись обратно в half
+            r = max(0f, softKneeAbove1(r, headroom)); g = max(0f, softKneeAbove1(g, headroom)); b = max(0f, softKneeAbove1(b, headroom))
+             // Запись обратно в half
             half[i    ] = Half.toHalf(r)
             half[i + 1] = Half.toHalf(g)
             half[i + 2] = Half.toHalf(b)
@@ -55,6 +59,10 @@ object HdrTonemap {
         // Записываем обратно без 8‑битной квантизации
         linearSrgbF16.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
         HalfBufferPool.trimIfOversized()
+        // После тонмапа явно помечаем bitmap как Linear sRGB
+        if (android.os.Build.VERSION.SDK_INT >= 26) {
+            linearSrgbF16.setColorSpace(ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
+        }
         Logger.i("IO", "hdr.tonemap.done", mapOf("space" to srcColorSpace.name, "headroomMax" to headroomMax))
         return true
     }

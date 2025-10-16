@@ -34,25 +34,31 @@ object ImagePrep {
     ): PrepResult {
         // 1) Декод
         val dec = Decoder.decodeUri(ctx, uri)
-        // 2) В линейный sRGB (F16). Избегаем двойного преобразования, если уже RGBA_F16 + Linear sRGB.
-        val linear = if (android.os.Build.VERSION.SDK_INT >= 26 &&
-            dec.bitmap.config == Bitmap.Config.RGBA_F16 &&
-            dec.bitmap.colorSpace == ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
-            ) {
-            // обеспечим mutability, чтобы фильтры могли писать in-place
-            dec.bitmap.copy(Bitmap.Config.RGBA_F16, /*mutable*/ true)
-        } else {
-                ColorMgmt.toLinearSrgbF16(dec.bitmap, dec.colorSpace)
-            }
+        // 2) В линейный sRGB (F16). Избегаем лишнего копирования: если уже RGBA_F16 + Linear sRGB + mutable — используем как есть.
+        val alreadyLinear = (android.os.Build.VERSION.SDK_INT >= 26
+                && dec.bitmap.config == Bitmap.Config.RGBA_F16
+                && dec.bitmap.colorSpace == ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
+        val linear = when {
+            alreadyLinear && dec.bitmap.isMutable -> dec.bitmap
+            alreadyLinear -> dec.bitmap.copy(Bitmap.Config.RGBA_F16, /*mutable*/ true)
+            else -> ColorMgmt.toLinearSrgbF16(dec.bitmap, dec.colorSpace)
+        }
+        // Если вдруг Decoder в будущем вернёт non‑exclusive — зафиксируем это в логах (ожидаем exclusive=true).
+        if (!dec.exclusive && dec.bitmap === linear) {
+            Logger.w("IO", "decode.exclusive.violation", mapOf("note" to "shared-bitmap-passed-into-stage2"))
+        }
         // Освобождаем исходник ТОЛЬКО если он эксклюзивный и это разрешено политикой.
         if (dec.bitmap !== linear && dec.exclusive && recycleDecoded) {
             try { dec.bitmap.recycle() } catch (_: Throwable) {}
         }
         // 3) HDR тонмап при необходимости (PQ/HLG)
-        val wasHdr = HdrTonemap.applyIfNeeded(linear, dec.colorSpace)
+        val wasHdr = HdrTonemap.applyIfNeeded(linear, dec.colorSpace /*, headroom = 3f */)
         // 4) Blockiness + deblock
         val blk = Deblocking8x8.measureBlockinessLinear(linear)
-        if (blk.mean >= deblockThreshold) {
+        // Ранний skip: силы ~0 — не тратим проход по изображению
+        if (blk.mean < deblockThreshold * 0.5f) {
+            Logger.i("FILTER", "deblock.skipped.early", mapOf("mean" to blk.mean, "thr" to deblockThreshold))
+        } else if (blk.mean >= deblockThreshold) {
             // сила адаптируется к измеренной блочности (простая кривуля)
             val strength = (blk.mean * 12f).coerceIn(0f, 0.7f)
             Deblocking8x8.weakDeblockInPlaceLinear(linear, strength = strength)

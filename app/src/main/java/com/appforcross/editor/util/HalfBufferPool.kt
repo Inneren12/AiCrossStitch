@@ -19,12 +19,16 @@ object HalfBufferPool {
     }
 
     /** Гарантирует буфер не меньше [required] шортов. Возвращает ссылку на пул. */
-    fun obtain(required: Int): ShortArray {
+    @JvmOverloads
+    fun obtain(required: Int, clear: Boolean = false): ShortArray {
         var buf = local.get()
         if (buf.size < required) {
             // Рост только вверх (до подрезки). Копию не делаем — новый массив.
             buf = ShortArray(required)
             local.set(buf)
+        }
+        if (clear) {
+            java.util.Arrays.fill(buf, 0.toShort())
         }
         return buf
     }
@@ -46,4 +50,9 @@ object HalfBufferPool {
             local.set(ShortArray(0))
         }
     }
+    /** Явно «освободить» буфер потока (например, в onDestroy/cleanup). */
+    fun release() {
+        local.set(ShortArray(0))
+    }
+
 }

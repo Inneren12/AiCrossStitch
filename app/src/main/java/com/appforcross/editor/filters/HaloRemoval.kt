@@ -6,6 +6,7 @@ import com.appforcross.editor.logging.Logger
 import kotlin.math.*
 import android.util.Half
 import java.nio.ShortBuffer
+import com.appforcross.editor.util.HalfBufferPool
 
 /** Подавление светлых ореолов (смартфонный шарп): DoG вдоль кромок + мягкий clamp. */
 object HaloRemoval {
@@ -36,18 +37,27 @@ object HaloRemoval {
     fun removeHalosInPlaceLinear(bitmap: Bitmap, amount: Float = 0.25f, radiusPx: Int = 2): Float {
         val w = bitmap.width
         val h = bitmap.height
-        // Карта яркости (linear luma) из float‑пикселей
+        // Защита от слишком больших радиусов (O(r) свёртка)
+        val r = radiusPx.coerceIn(1, 32)
+        // Считываем half‑пиксели одним буфером, чтобы избежать миллионов getColor()
+        val total = w * h * 4
+        val half = HalfBufferPool.obtain(total)
+        bitmap.copyPixelsToBuffer(ShortBuffer.wrap(half, 0, total))
+        // Карта яркости (linear luma) из half‑компонент
         val L = FloatArray(w * h)
-        var idx = 0
-        for (y in 0 until h) for (x in 0 until w) {
-            val c = bitmap.getColor(x, y)
-            L[idx++] = 0.2126f * c.red() + 0.7152f * c.green() + 0.0722f * c.blue()
+        var pi = 0
+        for (i in 0 until (w * h)) {
+            val rF = Half.toFloat(half[pi    ])
+            val gF = Half.toFloat(half[pi + 1])
+            val bF = Half.toFloat(half[pi + 2])
+            L[i] = 0.2126f * rF + 0.7152f * gF + 0.0722f * bF
+            pi += 4
         }
 
         // 1) DoG: blur(r) - blur(1.6*r) — ближе к каноническому DoG
         val ws = wsLocal.get().apply { ensure(w * h) }
-        gaussianBlurInto(L, w, h, radiusPx, ws.bufA, ws) // small
-        val largeR = max(1, (radiusPx * 1.6f).roundToInt())
+        gaussianBlurInto(L, w, h, r, ws.bufA, ws) // small
+        val largeR = max(1, (r * 1.6f).roundToInt())
         gaussianBlurInto(L, w, h, largeR, ws.bufB, ws)   // large
         var haloScore = 0.0
 
@@ -58,26 +68,33 @@ object HaloRemoval {
         haloScore /= pxCount
         val amountEff = (amount * (1.0f + (haloScore * 20.0).toFloat())).coerceIn(0.1f, 0.6f)
 
-        // 3) Коррекция in‑place и запись назад без 8‑бит квантизации (half‑float)
-        val half = ShortArray(w * h * 4)
-        var p = 0; idx = 0
-        for (y in 0 until h) for (x in 0 until w) {
-            val c = bitmap.getColor(x, y)
+        // 3) Коррекция in‑place и запись назад без 8‑бит квантизации (half‑float, тот же буфер)
+        var idx = 0
+        var p = 0
+        for (i in 0 until (w * h)) {
+            val r0 = Half.toFloat(half[p    ])
+            val g0 = Half.toFloat(half[p + 1])
+            val b0 = Half.toFloat(half[p + 2])
+            val a0 = Half.toFloat(half[p + 3])
             val l = L[idx]
             val d = ws.bufA[idx] - ws.bufB[idx]; idx++
             val k = if (d > 0f) amountEff else amountEff * 0.05f
             val nl = (l - k * d).coerceIn(0f, 1f)
             val scale = if (l > 1e-6f) nl / l else 1f
-            val nr = (c.red() * scale).coerceIn(0f, 1f)
-            val ng = (c.green() * scale).coerceIn(0f, 1f)
-            val nb = (c.blue() * scale).coerceIn(0f, 1f)
-            half[p++] = Half.toHalf(nr)
-            half[p++] = Half.toHalf(ng)
-            half[p++] = Half.toHalf(nb)
-            half[p++] = Half.toHalf(c.alpha())
+            val nr = (r0 * scale).coerceIn(0f, 1f)
+            val ng = (g0 * scale).coerceIn(0f, 1f)
+            val nb = (b0 * scale).coerceIn(0f, 1f)
+            half[p    ] = Half.toHalf(nr)
+            half[p + 1] = Half.toHalf(ng)
+            half[p + 2] = Half.toHalf(nb)
+            half[p + 3] = Half.toHalf(a0.coerceIn(0f, 1f))
+            p += 4
         }
-        bitmap.copyPixelsFromBuffer(ShortBuffer.wrap(half))
-        Logger.i("FILTER", "halo.removed", mapOf("score" to haloScore, "amount_req" to amount, "amount_eff" to amountEff, "radius" to radiusPx, "radiusLarge" to largeR))
+        bitmap.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
+        // По завершении — подрежем слишком большой half‑буфер и рабочие float‑буферы
+        HalfBufferPool.trimIfOversized()
+        Logger.i("FILTER", "halo.removed", mapOf("score" to haloScore, "amount_req" to amount, "amount_eff" to amountEff, "radius" to r, "radiusLarge" to largeR))
+
         // Снижаем удержание памяти в длительных потоках
         ws.maybeShrink(w * h)
         return haloScore.toFloat()
