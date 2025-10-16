@@ -59,26 +59,23 @@ object Deblocking8x8 {
     fun weakDeblockInPlaceLinear(bitmap: Bitmap, strength: Float = 0.5f) {
         val w = bitmap.width
         val h = bitmap.height
+        // Вертикальные границы: по ОДНОМУ setPixels на строку
         val row = IntArray(w)
-        // вертикали
-        var x = 8
-        while (x < w) {
-            for (y in 0 until h) {
-                bitmap.getPixels(row, 0, w, 0, y, w, 1)
+        for (y in 0 until h) {
+            bitmap.getPixels(row, 0, w, 0, y, w, 1)
+            var x = 8
+            while (x < w) {
                 val cL = Color.valueOf(row[x - 1])
                 val cR = Color.valueOf(row[x])
                 val r = (cL.red() + cR.red()) * 0.5f
                 val g = (cL.green() + cR.green()) * 0.5f
                 val b = (cL.blue() + cR.blue()) * 0.5f
                 val a = (cL.alpha() + cR.alpha()) * 0.5f
-                // смешиваем в сторону среднего (strength 0..1)
-                val nl = lerpColor(cL, r, g, b, a, strength)
-                val nr = lerpColor(cR, r, g, b, a, strength)
-                row[x - 1] = nl
-                row[x] = nr
-                bitmap.setPixels(row, 0, w, 0, y, w, 1)
+                row[x - 1] = lerpColor(cL, r, g, b, a, strength)
+                row[x]     = lerpColor(cR, r, g, b, a, strength)
+                x += 8
             }
-            x += 8
+            bitmap.setPixels(row, 0, w, 0, y, w, 1)
         }
         // горизонты
         var yb = 8

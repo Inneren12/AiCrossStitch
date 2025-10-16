@@ -13,7 +13,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import java.util.TimeZone
 import kotlin.concurrent.thread
-
+import kotlin.concurrent.thread
 object DiagnosticsManager {
     private const val DIAG_DIR = "diag"
     private const val SESS_PREFIX = "session-"
@@ -25,10 +25,12 @@ object DiagnosticsManager {
     /** Доступ к активной сессии без повторного обращения к ФС. */
     fun activeSession(): Session? = activeSession
     fun activeSessionId(): String? = activeSession?.id
+
     /**
-     * Создаёт каталог сессии и (по умолчанию) переносит ротацию в фон.
-     * Это снижает задержку старта приложения (см. п.1 рекомендаций).
+     * Создаёт каталог сессии и запускает ротацию в фоне (не блокируя UI).
+     * Параметр оставлен для совместимости с прежними вызовами.
      */
+    @JvmOverloads
     fun startSession(ctx: Context, rotateInBackground: Boolean = true): Session {
         val root = File(ctx.filesDir, DIAG_DIR).apply { if (!exists()) mkdirs() }
         val startedAt = Date()
@@ -37,7 +39,13 @@ object DiagnosticsManager {
         if (rotateInBackground) {
             thread(name = "diag-rotate", isDaemon = true) { rotate(root) }
         } else {
-                rotate(root)
+            if (rotateInBackground) {
+                thread(name = "diag-rotate", isDaemon = true) {
+                    try { rotate(root) } catch (_: Throwable) {}
+                }
+            } else {
+                    rotate(root)
+                }
             }
         Logger.i("IO", "io.session.start", mapOf(
             "diag_root" to root.absolutePath,
@@ -69,6 +77,7 @@ object DiagnosticsManager {
         try {
             // 3) Перед упаковкой убеждаемся, что очередь записи логгера пуста.
             Logger.flush()
+            try { Logger.flush() } catch (_: Throwable) {}
             zipDir(sessionDir, out)
         } finally {
                 Logger.resumeWrites()

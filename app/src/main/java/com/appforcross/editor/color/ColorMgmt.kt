@@ -1,16 +1,20 @@
 package com.appforcross.editor.color
 
+import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.ColorSpace
 import android.os.Build
 import com.appforcross.editor.logging.Logger
 import kotlin.math.*
+import android.util.Half
+import java.nio.ShortBuffer
 
 /** Конверсия в **linear sRGB** (RGBA_F16), далее все фильтры — в линейном RGB. */
 object ColorMgmt {
 
     /** Преобразовать bitmap (в любом поддерживаемом ColorSpace) в **linear sRGB RGBA_F16**. */
+    @SuppressLint("HalfFloat")
     fun toLinearSrgbF16(src: Bitmap, srcCs: ColorSpace?): Bitmap {
         val w = src.width
         val h = src.height
@@ -20,30 +24,28 @@ object ColorMgmt {
             out.setColorSpace(ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
         }
         if (Build.VERSION.SDK_INT >= 26 && srcCs != null) {
+            // Полностью плавающая обработка: читаем float-компоненты и пишем half‑float без 8‑бит квантизации.
             val dst = ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
             val connector = ColorSpace.connect(srcCs, dst)
-            val px = IntArray(w)
-            val row = IntArray(w)
+            val half = ShortArray(w * h * 4)
+            var p = 0
             for (y in 0 until h) {
-                src.getPixels(px, 0, w, 0, y, w, 1)
                 for (x in 0 until w) {
-                    val c = px[x]
-                    val a = Color.alpha(c) / 255f
-                    val r = Color.red(c) / 255f
-                    val g = Color.green(c) / 255f
-                    val b = Color.blue(c) / 255f
-                    val v = connector.transform(floatArrayOf(r, g, b))
-                    // ВАЖНО: интерпретируем значения как **LINEAR_SRGB** при упаковке,
-                    // чтобы при записи в RGBA_F16 (Linear) не было двойной гаммы.
-                    row[x] = Color.valueOf(v[0], v[1], v[2], a, dst).toArgb()
+                    val col = src.getColor(x, y) // float-компоненты в srcCs
+                    val v = connector.transform(floatArrayOf(col.red(), col.green(), col.blue()))
+                    half[p++] = Half.toHalf(v[0])
+                    half[p++] = Half.toHalf(v[1])
+                    half[p++] = Half.toHalf(v[2])
+                    half[p++] = Half.toHalf(col.alpha())
                 }
-                out.setPixels(row, 0, w, 0, y, w, 1)
             }
+            out.copyPixelsFromBuffer(ShortBuffer.wrap(half))
             Logger.i("COLOR", "gamut.convert", mapOf("src" to srcCs.name, "dst" to "Linear sRGB (F16)"))
         } else {
-            // Fallback: считаем, что sRGB, вручную в линейку
+            // Fallback (<26 или нет ColorSpace): считаем, что вход — sRGB 8‑бит и переводим в линейку.
             val px = IntArray(w)
-            val row = IntArray(w)
+            val half = ShortArray(w * h * 4)
+            var p = 0
             for (y in 0 until h) {
                 src.getPixels(px, 0, w, 0, y, w, 1)
                 for (x in 0 until w) {
@@ -52,11 +54,13 @@ object ColorMgmt {
                     val r = srgbToLinear(Color.red(c) / 255f)
                     val g = srgbToLinear(Color.green(c) / 255f)
                     val b = srgbToLinear(Color.blue(c) / 255f)
-                    // Аналогично — указываем LINEAR_SRGB при упаковке.
-                    row[x] = Color.valueOf(r, g, b, a, ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)).toArgb()
+                    half[p++] = Half.toHalf(r)
+                    half[p++] = Half.toHalf(g)
+                    half[p++] = Half.toHalf(b)
+                    half[p++] = Half.toHalf(a)
                 }
-                out.setPixels(row, 0, w, 0, y, w, 1)
             }
+            out.copyPixelsFromBuffer(ShortBuffer.wrap(half))
             Logger.w("COLOR", "gamut.assume_srgb", mapOf("dst" to "Linear sRGB (F16)"))
         }
         return out

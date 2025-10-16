@@ -1,9 +1,11 @@
 package com.appforcross.editor.filters
 
+import android.annotation.SuppressLint
 import android.graphics.Bitmap
-import android.graphics.Color
 import com.appforcross.editor.logging.Logger
 import kotlin.math.*
+import android.util.Half
+import java.nio.ShortBuffer
 
 /** Подавление светлых ореолов (смартфонный шарп): DoG вдоль кромок + мягкий clamp. */
 object HaloRemoval {
@@ -13,6 +15,14 @@ object HaloRemoval {
         var tmp = FloatArray(0)
         var bufA = FloatArray(0)
         var bufB = FloatArray(0)
+        fun maybeShrink(pixelCount: Int) {
+            // Не удерживаем в ThreadLocal буферы > ~64 МБ на поток
+            val bytesEach = pixelCount * 4L
+            val tooLarge = bytesEach > 64L * 1024 * 1024
+            if (tooLarge) {
+                tmp = FloatArray(0); bufA = FloatArray(0); bufB = FloatArray(0)
+            }
+        }
         fun ensure(cap: Int) {
             if (tmp.size < cap) tmp = FloatArray(cap)
             if (bufA.size < cap) bufA = FloatArray(cap)
@@ -22,50 +32,54 @@ object HaloRemoval {
     private val wsLocal = ThreadLocal.withInitial { Workspace() }
 
     /** Возвращает оценку halo и применяет исправление in-place. */
+    @SuppressLint("HalfFloat")
     fun removeHalosInPlaceLinear(bitmap: Bitmap, amount: Float = 0.25f, radiusPx: Int = 2): Float {
         val w = bitmap.width
         val h = bitmap.height
-        val src = IntArray(w * h)
-        val dst = IntArray(w * h)
-        bitmap.getPixels(src, 0, w, 0, 0, w, h)
-
-        // 1) Собираем карту яркости (linear luma)
+        // Карта яркости (linear luma) из float‑пикселей
         val L = FloatArray(w * h)
-        for (i in src.indices) {
-            val c = Color.valueOf(src[i])
-            L[i] = 0.2126f * c.red() + 0.7152f * c.green() + 0.0722f * c.blue()
+        var idx = 0
+        for (y in 0 until h) for (x in 0 until w) {
+            val c = bitmap.getColor(x, y)
+            L[idx++] = 0.2126f * c.red() + 0.7152f * c.green() + 0.0722f * c.blue()
         }
 
-        // 2) DoG: blur(r) - blur(1.6*r) — ближе к каноническому DoG
+        // 1) DoG: blur(r) - blur(1.6*r) — ближе к каноническому DoG
         val ws = wsLocal.get().apply { ensure(w * h) }
         gaussianBlurInto(L, w, h, radiusPx, ws.bufA, ws) // small
         val largeR = max(1, (radiusPx * 1.6f).roundToInt())
         gaussianBlurInto(L, w, h, largeR, ws.bufB, ws)   // large
         var haloScore = 0.0
 
-        // 3) Снижаем положительные ореолы (светлые каймы) около кромок.
-        //    Простая эвристика: если DoG>>0 — уменьшаем L; если DoG<<0 — почти не трогаем.
-        var idx = 0
-        for (y in 0 until h) {
-            for (x in 0 until w) {
-                val c = Color.valueOf(src[idx])
-                val l = L[idx]
-                val d = ws.bufA[idx] - ws.bufB[idx]
-                haloScore += abs(d.toDouble())
-                val k = if (d > 0f) amount else amount * 0.05f
-                val nl = (l - k * d).coerceIn(0f, 1f)
-                // Пропорционально меняем RGB (сохраняя оттенок)
-                val scale = if (l > 1e-6f) nl / l else 1f
-                val nr = (c.red() * scale).coerceIn(0f, 1f)
-                val ng = (c.green() * scale).coerceIn(0f, 1f)
-                val nb = (c.blue() * scale).coerceIn(0f, 1f)
-                dst[idx] = Color.valueOf(nr, ng, nb, c.alpha()).toArgb()
-                idx++
-            }
+        // 2) Адаптивная сила по средней величине DoG
+        val pxCount = (w * h).toDouble()
+        // средняя |DoG|
+        for (i in 0 until w * h) haloScore += abs((ws.bufA[i] - ws.bufB[i]).toDouble())
+        haloScore /= pxCount
+        val amountEff = (amount * (1.0f + (haloScore * 20.0).toFloat())).coerceIn(0.1f, 0.6f)
+
+        // 3) Коррекция in‑place и запись назад без 8‑бит квантизации (half‑float)
+        val half = ShortArray(w * h * 4)
+        var p = 0; idx = 0
+        for (y in 0 until h) for (x in 0 until w) {
+            val c = bitmap.getColor(x, y)
+            val l = L[idx]
+            val d = ws.bufA[idx] - ws.bufB[idx]; idx++
+            val k = if (d > 0f) amountEff else amountEff * 0.05f
+            val nl = (l - k * d).coerceIn(0f, 1f)
+            val scale = if (l > 1e-6f) nl / l else 1f
+            val nr = (c.red() * scale).coerceIn(0f, 1f)
+            val ng = (c.green() * scale).coerceIn(0f, 1f)
+            val nb = (c.blue() * scale).coerceIn(0f, 1f)
+            half[p++] = Half.toHalf(nr)
+            half[p++] = Half.toHalf(ng)
+            half[p++] = Half.toHalf(nb)
+            half[p++] = Half.toHalf(c.alpha())
         }
-        haloScore /= (w * h).toDouble()
-        bitmap.setPixels(dst, 0, w, 0, 0, w, h)
-        Logger.i("FILTER", "halo.removed", mapOf("score" to haloScore, "amount" to amount, "radius" to radiusPx, "radiusLarge" to largeR))
+        bitmap.copyPixelsFromBuffer(ShortBuffer.wrap(half))
+        Logger.i("FILTER", "halo.removed", mapOf("score" to haloScore, "amount_req" to amount, "amount_eff" to amountEff, "radius" to radiusPx, "radiusLarge" to largeR))
+        // Снижаем удержание памяти в длительных потоках
+        ws.maybeShrink(w * h)
         return haloScore.toFloat()
     }
 

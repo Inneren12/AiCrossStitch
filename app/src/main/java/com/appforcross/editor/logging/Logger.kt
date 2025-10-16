@@ -51,13 +51,15 @@ object Logger {
     +     * Принудительное «осушение» очереди записи — полезно перед экспортом диагностики.
     +     * Реализовано барьером: пустая задача, которую дожидаемся, гарантирует выполнение всех предыдущих.
     +     */
-    fun flush(timeoutMs: Long = 5_000) {
+    fun flush(timeoutMs: Long = 3000) {
         if (!running.get()) return
         try {
-            val f = writerExecutor.submit {}
-            f.get(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
-        } catch (_: Exception) {
-            // игнорируем таймаут/остановку — в худшем случае часть записей не успела дойти
+            val fut = writerExecutor.submit {}
+            fut.get(timeoutMs, TimeUnit.MILLISECONDS)
+        } catch (_: RejectedExecutionException) {
+            // пул уже закрыт — нечего ждать
+        } catch (t: Throwable) {
+            // проглатываем — в крайних случаях часть логов могла не успеть записаться
         }
     }
 
@@ -93,12 +95,15 @@ object Logger {
                 LogLevel.ERROR -> Log.e(tag, msg)
             }
         }
+        val target = fileRef.get() ?: return
         if (fileRef.get() == null) return
         if (!running.get()) return
         try {
+            // Захватываем ссылку локально, чтобы не потерять её в лямбде
+            val dest = target
             writerExecutor.execute {
                 try {
-                    BufferedWriter(FileWriter(file, true)).use {
+                    BufferedWriter(FileWriter(dest, true)).use {
                         it.write(line)
                         it.flush()
                     }
@@ -132,5 +137,4 @@ object Logger {
             writeLock.unlock()
         }
     }
-
 }

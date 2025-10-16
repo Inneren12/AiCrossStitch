@@ -1,7 +1,9 @@
 package com.appforcross.editor.color
 
+import android.annotation.SuppressLint
 import android.graphics.Bitmap
-import android.graphics.Color
+import android.util.Half
+import java.nio.ShortBuffer
 import android.graphics.ColorSpace
 import com.appforcross.editor.logging.Logger
 import kotlin.math.*
@@ -10,6 +12,7 @@ import kotlin.math.*
 object HdrTonemap {
 
     /** Если cs == BT2020_PQ или BT2020_HLG — применяет EOTF к **linear sRGB F16** bitmap. */
+    @SuppressLint("NewApi", "HalfFloat")
     fun applyIfNeeded(linearSrgbF16: Bitmap, srcColorSpace: ColorSpace?): Boolean {
         if (srcColorSpace == null) return false
         val isPQ = srcColorSpace == ColorSpace.get(ColorSpace.Named.BT2020_PQ)
@@ -17,29 +20,26 @@ object HdrTonemap {
         if (!isPQ && !isHLG) return false
         val w = linearSrgbF16.width
         val h = linearSrgbF16.height
-        val dst = ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
+        // Пишем сразу в half‑float буфер, исключая 8‑битную квантизацию.
+        val half = ShortArray(w * h * 4)
         if (isPQ) Logger.i("IO", "hdr.tonemap", mapOf("oetf" to "PQ", "space" to srcColorSpace.name))
         if (isHLG) Logger.i("IO", "hdr.tonemap", mapOf("oetf" to "HLG", "space" to srcColorSpace.name))
-        val row = IntArray(w)
+        var p = 0
         for (y in 0 until h) {
             for (x in 0 until w) {
-                // Читаем без потери: Bitmap.getColor() возвращает float-компоненты в пространстве bitmap (Linear sRGB).
-                val c = linearSrgbF16.getColor(x, y)
+                val c = linearSrgbF16.getColor(x, y) // Linear sRGB
                 var r = c.red(); var g = c.green(); var b = c.blue()
-                // На входе уже linear sRGB; «hdr» — headroom > 1.0 после EOTF.
-                if (isPQ) {
-                    r = pqToLinear(r); g = pqToLinear(g); b = pqToLinear(b)
-                } else {
-                        r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b)
-                    }
-                // Мягкое «плечо» вместо жёсткого клипа: сохраняем запас яркости для последующих шагов.
+                if (isPQ) { r = pqToLinear(r); g = pqToLinear(g); b = pqToLinear(b) }
+                else      { r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b) }
                 r = softKneeAbove1(r); g = softKneeAbove1(g); b = softKneeAbove1(b)
-                // нижняя граница 0 (отрицательные значения не несут пользы)
                 if (r < 0f) r = 0f; if (g < 0f) g = 0f; if (b < 0f) b = 0f
-                row[x] = Color.valueOf(r, g, b, c.alpha(), dst).toArgb()
+                half[p++] = Half.toHalf(r)
+                half[p++] = Half.toHalf(g)
+                half[p++] = Half.toHalf(b)
+                half[p++] = Half.toHalf(c.alpha())
             }
-            linearSrgbF16.setPixels(row, 0, w, 0, y, w, 1)
         }
+        linearSrgbF16.copyPixelsFromBuffer(ShortBuffer.wrap(half))
         return true
     }
 
