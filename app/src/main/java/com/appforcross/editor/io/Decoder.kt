@@ -7,8 +7,9 @@ import android.net.Uri
 import android.os.Build
 import androidx.exifinterface.media.ExifInterface
 import com.appforcross.editor.logging.Logger
+import android.content.res.AssetFileDescriptor
 import java.io.InputStream
-
+import java.util.concurrent.Callable
 data class DecodedImage(
         val bitmap: Bitmap,                 // как прочитали (ARGB_8888 или RGBA_F16)
         val colorSpace: ColorSpace?,        // исходное пространство
@@ -27,42 +28,69 @@ object Decoder {
     fun decodeUri(ctx: Context, uri: Uri): DecodedImage {
         Logger.i("IO", "decode.start", mapOf("uri" to uri.toString()))
         val mime = safeMime(ctx.contentResolver, uri)
-        // Читаем EXIF‑ориентацию ЗАРАНЕЕ (без повторного открытия после декода).
-        val exifOrientation = readExifOrientation(ctx.contentResolver, uri)
-        val srcBmp: Bitmap
-        val srcCs: ColorSpace?
+        var srcBmp: Bitmap
+        var srcCs: ColorSpace?
+        val exifOrientation: Int
 
         if (Build.VERSION.SDK_INT >= 28) {
-            val source = ImageDecoder.createSource(ctx.contentResolver, uri)
+            // EXIF берём через AFD один раз...
+            val resolver = ctx.contentResolver
+            resolver.openAssetFileDescriptor(uri, "r").use { afd ->
+                exifOrientation =
+                    if (afd == null) ExifInterface.ORIENTATION_UNDEFINED else readExifOrientation(afd)
+            }
+            // ...а Source создаём через Callable<AFD>, чтобы декодер сам управлял ресурсом.
+            val source = ImageDecoder.createSource(java.util.concurrent.Callable {
+                resolver.openAssetFileDescriptor(uri, "r")
+                    ?: throw IllegalArgumentException("openAssetFileDescriptor returned null")
+            })
             var outCs: ColorSpace? = null
             srcBmp = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-                // Если HDR/широкий гамут, просим F16, иначе достаточно 8888
-                val cs = info.colorSpace
-                outCs = cs
-                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                decoder.isMutableRequired = true
-                decoder.setTargetColorSpace(cs ?: ColorSpace.get(ColorSpace.Named.SRGB))
-                decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_LOW_RAM
-                // Ограничаем размер декода для очень больших исходников
-                val w0 = info.size.width
-                val h0 = info.size.height
-                val mp = 1L * w0 * h0
-                if (mp > MAX_DEC_MP) {
-                    val scale = kotlin.math.sqrt(MAX_DEC_MP.toDouble() / mp.toDouble())
-                    val tw = kotlin.math.max(1, (w0 * scale).toInt())
-                    val th = kotlin.math.max(1, (h0 * scale).toInt())
-                    decoder.setTargetSize(tw, th)
-                }
-                if (cs?.isWideGamut == true || cs == ColorSpace.get(ColorSpace.Named.BT2020_HLG) || cs == ColorSpace.get(ColorSpace.Named.BT2020_PQ)) {
-                    decoder.setTargetColorSpace(cs)
-                }
+        // Если HDR/широкий гамут, просим F16, иначе достаточно 8888
+                    val cs = info.colorSpace
+                    outCs = cs
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    decoder.isMutableRequired = true
+                    decoder.setTargetColorSpace(cs ?: ColorSpace.get(ColorSpace.Named.SRGB))
+                    decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_LOW_RAM
+                    // Ограничаем размер декода для очень больших исходников (~16 Мп)
+                    val w0 = info.size.width
+                    val h0 = info.size.height
+                    val mp = 1L * w0 * h0
+                    if (mp > MAX_DEC_MP) {
+                        val scale = kotlin.math.sqrt(MAX_DEC_MP.toDouble() / mp.toDouble())
+                        val tw = kotlin.math.max(1, (w0 * scale).toInt())
+                        val th = kotlin.math.max(1, (h0 * scale).toInt())
+                        decoder.setTargetSize(tw, th)
+                    }
+                    if (cs?.isWideGamut == true || cs == ColorSpace.get(ColorSpace.Named.BT2020_HLG) || cs == ColorSpace.get(ColorSpace.Named.BT2020_PQ)) {
+                        decoder.setTargetColorSpace(cs)
+                    }
             }
             srcCs = outCs
         } else {
-            // Fallback: BitmapFactory
-            val opts = BitmapFactory.Options().apply { inMutable = true }
+            // Fallback: BitmapFactory (+ inSampleSize для лимита 16 Мп)
+            exifOrientation = readExifOrientation(ctx.contentResolver, uri)
+            // 1) измеряем bounds
+            val ob = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             ctx.contentResolver.openInputStream(uri).use { ins ->
-                srcBmp = BitmapFactory.decodeStream(ins, null, opts) ?: throw IllegalArgumentException("decodeStream failed")
+                BitmapFactory.decodeStream(ins, null, ob)
+            }
+            val w0 = ob.outWidth
+            val h0 = ob.outHeight
+            var sample = 1
+            if (w0 > 0 && h0 > 0) {
+                while ((1L * (w0 / sample) * (h0 / sample)) > MAX_DEC_MP) sample = sample shl 1
+            }
+            // 2) основной декод
+            val opts = BitmapFactory.Options().apply {
+                inMutable = true
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            ctx.contentResolver.openInputStream(uri).use { ins ->
+                srcBmp = BitmapFactory.decodeStream(ins, null, opts)
+                    ?: throw IllegalArgumentException("decodeStream failed")
             }
             srcCs = if (Build.VERSION.SDK_INT >= 26) srcBmp.colorSpace else ColorSpace.get(ColorSpace.Named.SRGB)
         }
@@ -90,8 +118,8 @@ object Decoder {
             width = outBmp.width,
             height = outBmp.height,
             mime = mime,
-            // Эксклюзивность приближаем по мутируемости результата декода/поворота.
-            exclusive = outBmp.isMutable
+            // Консервативно: буфер считаем разделяемым до явного копирования выше по пайплайну.
+            exclusive = false
         )
     }
 
@@ -108,6 +136,15 @@ object Decoder {
             ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
             ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.preScale(-1f, 1f)
             ExifInterface.ORIENTATION_FLIP_VERTICAL   -> m.preScale(1f, -1f)
+            // Доп. случаи 5/7: flip H + rotate (см. AndroidX Camera TransformUtils)
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                m.postScale(-1f, 1f)
+                m.postRotate(270f)
+            }
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                m.postScale(-1f, 1f)
+                m.postRotate(90f)
+            }
             else -> return Pair(bmp, false)
         }
         val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
@@ -115,10 +152,19 @@ object Decoder {
     }
 
     /** Однократное чтение EXIF‑ориентации (до декодирования). */
+    /** EXIF-ориентация из AFD/FD — без лишнего InputStream. */
+    private fun readExifOrientation(afd: AssetFileDescriptor): Int = try {
+        ExifInterface(afd.fileDescriptor)
+            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+    } catch (_: Exception) {
+        ExifInterface.ORIENTATION_UNDEFINED
+    }
+    /** Fallback для старого кода: читаем EXIF через AFD, а не через InputStream. */
     private fun readExifOrientation(res: ContentResolver, uri: Uri): Int = try {
-        res.openInputStream(uri).use { ins ->
-            if (ins == null) ExifInterface.ORIENTATION_UNDEFINED
-            else ExifInterface(ins).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        res.openAssetFileDescriptor(uri, "r").use { afd ->
+            if (afd == null) ExifInterface.ORIENTATION_UNDEFINED
+            else ExifInterface(afd.fileDescriptor)
+                .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
         }
     } catch (_: Exception) {
         ExifInterface.ORIENTATION_UNDEFINED

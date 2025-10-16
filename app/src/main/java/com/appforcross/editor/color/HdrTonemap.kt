@@ -11,13 +11,15 @@ import com.appforcross.editor.util.HalfBufferPool
 
 /** Простейший EOTF для BT.2100 **PQ** и **HLG** → линейный (норм. до [0..1]). */
 object HdrTonemap {
-
+    /** Глобальный дефолт для "плеча" HDR→SDR; может задаваться из настроек/UI. */
+    @Volatile
+    var defaultHeadroom: Float = 3f
     /** Если cs == BT2020_PQ или BT2020_HLG — применяет EOTF к **linear sRGB F16** bitmap. */
     @SuppressLint("NewApi", "HalfFloat")
     fun applyIfNeeded(
         linearSrgbF16: Bitmap,
         srcColorSpace: ColorSpace?,
-        headroom: Float = 3f
+        headroom: Float = defaultHeadroom
     ): Boolean {
         if (srcColorSpace == null) return false
         val isPQ = srcColorSpace == ColorSpace.get(ColorSpace.Named.BT2020_PQ)
@@ -28,43 +30,53 @@ object HdrTonemap {
         // === Буферизованное чтение/запись F16 ===
         val total = w * h * 4
         val half = HalfBufferPool.obtain(total)
-        // Считываем сырые half‑значения линейного sRGB (RGBA_F16) без getColor.
-        val inBuf: ShortBuffer = ShortBuffer.wrap(half, 0, total)
-        linearSrgbF16.copyPixelsToBuffer(inBuf)
-        if (isPQ) Logger.i("IO", "hdr.tonemap", mapOf("oetf" to "PQ", "space" to srcColorSpace.name))
-        if (isHLG) Logger.i("IO", "hdr.tonemap", mapOf("oetf" to "HLG", "space" to srcColorSpace.name))
-        var headroomMax = 0f
-        // Обрабатываем in-place в массиве half (RGBA)
-        var i = 0
-        while (i < total) {
-            // R,G,B,A — в half
-            var r = Half.toFloat(half[i])
-            var g = Half.toFloat(half[i + 1])
-            var b = Half.toFloat(half[i + 2])
-            val a = Half.toFloat(half[i + 3]).coerceIn(0f, 1f)
-            // EOTF
-            if (isPQ) { r = pqToLinear(r); g = pqToLinear(g); b = pqToLinear(b) }
-            else      { r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b) }
-            // Телеметрия по "запасу над 1.0"
-            headroomMax = max(headroomMax, max(r, max(g, b)) - 1f)
-            // Мягкое плечо и клип снизу
-            r = max(0f, softKneeAbove1(r, headroom)); g = max(0f, softKneeAbove1(g, headroom)); b = max(0f, softKneeAbove1(b, headroom))
-             // Запись обратно в half
-            half[i    ] = Half.toHalf(r)
-            half[i + 1] = Half.toHalf(g)
-            half[i + 2] = Half.toHalf(b)
-            half[i + 3] = Half.toHalf(a)
-            i += 4
+        val sbIn: ShortBuffer = ShortBuffer.wrap(half, 0, total)
+        val isPremul = linearSrgbF16.isPremultiplied
+        try {
+            // Считываем сырые half-значения линейного sRGB (RGBA_F16) без getColor.
+            linearSrgbF16.copyPixelsToBuffer(sbIn)
+            if (isPQ) Logger.i("IO", "hdr.tonemap", mapOf("oetf" to "PQ", "space" to srcColorSpace.name, "premul" to isPremul))
+            if (isHLG) Logger.i("IO", "hdr.tonemap", mapOf("oetf" to "HLG", "space" to srcColorSpace.name, "premul" to isPremul))
+            var headroomMax = 0f
+            // Обрабатываем in-place в массиве half (RGBA)
+            var i = 0
+            while (i < total) {
+                // R,G,B,A — в half
+                var r = Half.toFloat(half[i])
+                var g = Half.toFloat(half[i + 1])
+                var b = Half.toFloat(half[i + 2])
+                val a = Half.toFloat(half[i + 3]).coerceIn(0f, 1f)
+                // EOTF
+                if (isPQ) { r = pqToLinear(r); g = pqToLinear(g); b = pqToLinear(b) }
+                else      { r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b) }
+                // Телеметрия по "запасу над 1.0": если кадр премультиплирован — считаем по депремультиплированным RGB.
+                val rgbMax = max(r, max(g, b))
+                val metricRgb = if (isPremul && a > 1e-6f) rgbMax / a else rgbMax
+                headroomMax = max(headroomMax, metricRgb - 1f)
+                // Мягкое плечо и клип снизу
+                r = max(0f, softKneeAbove1(r, headroom))
+                g = max(0f, softKneeAbove1(g, headroom))
+                b = max(0f, softKneeAbove1(b, headroom))
+                // Запись обратно в half
+                half[i    ] = Half.toHalf(r)
+                half[i + 1] = Half.toHalf(g)
+                half[i + 2] = Half.toHalf(b)
+                half[i + 3] = Half.toHalf(a)
+                i += 4
+            }
+            // Записываем обратно без 8-битной квантизации
+            linearSrgbF16.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
+            // После тонмапа явно помечаем bitmap как Linear sRGB
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                linearSrgbF16.setColorSpace(ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
+            }
+            Logger.i("IO", "hdr.tonemap.done",
+                mapOf("space" to srcColorSpace.name, "headroomMax" to headroomMax, "premul" to isPremul, "headroom" to headroom))
+            return true
+        } finally {
+            // Гарантированно усечём пул даже при исключениях
+            HalfBufferPool.trimIfOversized()
         }
-        // Записываем обратно без 8‑битной квантизации
-        linearSrgbF16.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
-        HalfBufferPool.trimIfOversized()
-        // После тонмапа явно помечаем bitmap как Linear sRGB
-        if (android.os.Build.VERSION.SDK_INT >= 26) {
-            linearSrgbF16.setColorSpace(ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
-        }
-        Logger.i("IO", "hdr.tonemap.done", mapOf("space" to srcColorSpace.name, "headroomMax" to headroomMax))
-        return true
     }
 
     // ===== BT.2100 — PQ (ST.2084) EOTF =====

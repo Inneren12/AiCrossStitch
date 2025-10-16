@@ -10,7 +10,7 @@ import kotlin.math.*
 import android.util.Half
 import com.appforcross.editor.util.HalfBufferPool
 import java.nio.ShortBuffer
-
+import java.nio.IntBuffer
 
 /** Конверсия в **linear sRGB** (RGBA_F16), далее все фильтры — в линейном RGB. */
 object ColorMgmt {
@@ -20,47 +20,96 @@ object ColorMgmt {
     fun toLinearSrgbF16(src: Bitmap, srcCs: ColorSpace?): Bitmap {
         val w = src.width
         val h = src.height
+        // [FAST PATH] Уже линейный RGBA_F16 — возврат без лишних копий (или только до mutable)
+        if (Build.VERSION.SDK_INT >= 26 &&
+            src.config == Bitmap.Config.RGBA_F16 &&
+            src.colorSpace == ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)) {
+            if (src.isMutable) return src
+            val cp = src.copy(Bitmap.Config.RGBA_F16, /*mutable*/ true)
+            cp.setColorSpace(ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
+            return cp
+        }
+
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.RGBA_F16)
         if (Build.VERSION.SDK_INT >= 26) {
-            // Явно помечаем целевое пространство — линейный sRGB.
             out.setColorSpace(ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
         }
         if (Build.VERSION.SDK_INT >= 26 && srcCs != null) {
             // Полностью плавающая обработка: читаем float-компоненты и пишем half‑float без 8‑бит квантизации.
+            // Конвертация блоком, без getColor на пиксель
             val dst = ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
-            val connector = ColorSpace.connect(srcCs, dst)
-            // Reuse: большой временный буфер берём из пула.
+            val connector = if (srcCs == dst) null else ColorSpace.connect(srcCs, dst)
             val total = w * h * 4
-            val half = HalfBufferPool.obtain(total)
-            val rgb = FloatArray(3) // переиспользуемый буфер для входных компонент
-            var p = 0
-            for (y in 0 until h) {
-                for (x in 0 until w) {
-                    val col = src.getColor(x, y) // float-компоненты в srcCs
-                    rgb[0] = col.red()
-                    rgb[1] = col.green()
-                    rgb[2] = col.blue()
-                    val v = connector.transform(rgb)
-                    half[p++] = Half.toHalf(v[0])
-                    half[p++] = Half.toHalf(v[1])
-                    half[p++] = Half.toHalf(v[2])
-                    half[p++] = Half.toHalf(col.alpha())
+            val halfOut = HalfBufferPool.obtain(total)
+            try {
+                when (src.config) {
+                    Bitmap.Config.RGBA_F16 -> {
+                        // Вход — half-float: читаем блоком и конвертируем через connector
+                        val halfIn = HalfBufferPool.obtain(total)
+                        try {
+                            src.copyPixelsToBuffer(ShortBuffer.wrap(halfIn, 0, total))
+                            var p = 0
+                            while (p < total) {
+                                val r = Half.toFloat(halfIn[p    ])
+                                val g = Half.toFloat(halfIn[p + 1])
+                                val b = Half.toFloat(halfIn[p + 2])
+                                if (connector != null) {
+                                    val v = connector.transform(r, g, b)
+                                    halfOut[p    ] = Half.toHalf(v[0])
+                                    halfOut[p + 1] = Half.toHalf(v[1])
+                                    halfOut[p + 2] = Half.toHalf(v[2])
+                                } else {
+                                    halfOut[p    ] = Half.toHalf(r)
+                                    halfOut[p + 1] = Half.toHalf(g)
+                                    halfOut[p + 2] = Half.toHalf(b)
+                                }
+                                halfOut[p + 3] = halfIn[p + 3] // alpha перенесём как есть
+                                p += 4
+                            }
+                        } finally {
+                            // Усушка — в внешнем finally
+                        }
+                    }
+                    else -> {
+                        // Вход — 8-бит (обычно sRGB). Читаем цельным блоком.
+                        val ints = IntArray(w * h)
+                        src.copyPixelsToBuffer(IntBuffer.wrap(ints))
+                        var p = 0
+                        for (c in ints) {
+                            val a = Color.alpha(c) / 255f
+                            val rN = Color.red(c)   / 255f
+                            val gN = Color.green(c) / 255f
+                            val bN = Color.blue(c)  / 255f
+                            if (connector != null) {
+                                val v = connector.transform(rN, gN, bN)
+                                halfOut[p++] = Half.toHalf(v[0])
+                                halfOut[p++] = Half.toHalf(v[1])
+                                halfOut[p++] = Half.toHalf(v[2])
+                            } else {
+                                // sRGB → linear sRGB по формуле
+                                halfOut[p++] = Half.toHalf(srgbToLinear(rN))
+                                halfOut[p++] = Half.toHalf(srgbToLinear(gN))
+                                halfOut[p++] = Half.toHalf(srgbToLinear(bN))
+                            }
+                            halfOut[p++] = Half.toHalf(a)
+                        }
+                    }
                 }
+                out.copyPixelsFromBuffer(ShortBuffer.wrap(halfOut, 0, total))
+                Logger.i("COLOR", "gamut.convert", mapOf("src" to srcCs.name, "dst" to "Linear sRGB (F16)"))
+            } finally {
+                // Всегда подрезаем пул, даже при исключениях
+                HalfBufferPool.trimIfOversized()
             }
-            out.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
-            // Не удерживаем гигантские буферы в долгоживущих потоках.
-            HalfBufferPool.trimIfOversized()
-            Logger.i("COLOR", "gamut.convert", mapOf("src" to srcCs.name, "dst" to "Linear sRGB (F16)"))
         } else {
             // Fallback (<26 или нет ColorSpace): считаем, что вход — sRGB 8‑бит и переводим в линейку.
-            val px = IntArray(w)
             val total = w * h * 4
             val half = HalfBufferPool.obtain(total)
-            var p = 0
-            for (y in 0 until h) {
-                src.getPixels(px, 0, w, 0, y, w, 1)
-                for (x in 0 until w) {
-                    val c = px[x]
+            try {
+                val ints = IntArray(w * h)
+                src.copyPixelsToBuffer(IntBuffer.wrap(ints))
+                var p = 0
+                for (c in ints) {
                     val a = Color.alpha(c) / 255f
                     val r = srgbToLinear(Color.red(c) / 255f)
                     val g = srgbToLinear(Color.green(c) / 255f)
@@ -70,10 +119,11 @@ object ColorMgmt {
                     half[p++] = Half.toHalf(b)
                     half[p++] = Half.toHalf(a)
                 }
+                out.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
+            } finally {
+                // Подрезка слишком больших буферов — всегда
+                HalfBufferPool.trimIfOversized()
             }
-            out.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
-            // Подрезка слишком больших буферов.
-            HalfBufferPool.trimIfOversized()
             Logger.w("COLOR", "gamut.assume_srgb", mapOf("dst" to "Linear sRGB (F16)"))
         }
         return out

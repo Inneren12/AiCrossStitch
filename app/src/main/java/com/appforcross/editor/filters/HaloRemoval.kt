@@ -39,65 +39,79 @@ object HaloRemoval {
         val h = bitmap.height
         // Защита от слишком больших радиусов (O(r) свёртка)
         val r = radiusPx.coerceIn(1, 32)
+        if (r != radiusPx) {
+            Logger.w("FILTER", "halo.radius.clamped", mapOf("requested" to radiusPx, "used" to r))
+        }
         // Считываем half‑пиксели одним буфером, чтобы избежать миллионов getColor()
         val total = w * h * 4
         val half = HalfBufferPool.obtain(total)
-        bitmap.copyPixelsToBuffer(ShortBuffer.wrap(half, 0, total))
-        // Карта яркости (linear luma) из half‑компонент
-        val L = FloatArray(w * h)
-        var pi = 0
-        for (i in 0 until (w * h)) {
-            val rF = Half.toFloat(half[pi    ])
-            val gF = Half.toFloat(half[pi + 1])
-            val bF = Half.toFloat(half[pi + 2])
-            L[i] = 0.2126f * rF + 0.7152f * gF + 0.0722f * bF
-            pi += 4
+        val sb = ShortBuffer.wrap(half, 0, total)
+        // Рабочие буферы (ThreadLocal)
+        val ws = wsLocal.get()
+        try {
+            // Чтение пикселей → half[]
+            bitmap.copyPixelsToBuffer(sb)
+            // После copyPixelsToBuffer позиция = total, вернём на 0 для последующей записи
+            sb.rewind()
+            // Карта яркости (linear luma) из half-компонент
+            val L = FloatArray(w * h)
+            var pi = 0
+            for (i in 0 until (w * h)) {
+                val rF = Half.toFloat(half[pi    ])
+                val gF = Half.toFloat(half[pi + 1])
+                val bF = Half.toFloat(half[pi + 2])
+                L[i] = 0.2126f * rF + 0.7152f * gF + 0.0722f * bF
+                pi += 4
+            }
+
+            // 1) DoG: blur(r) - blur(1.6*r) — ближе к каноническому DoG
+            ws.ensure(w * h)
+            gaussianBlurInto(L, w, h, r, ws.bufA, ws) // small
+            val largeR = max(1, (r * 1.6f).roundToInt())
+            gaussianBlurInto(L, w, h, largeR, ws.bufB, ws)   // large
+            var haloScore = 0.0
+
+            // 2) Адаптивная сила по средней величине DoG
+            val pxCount = (w * h).toDouble()
+            // средняя |DoG|
+            for (i in 0 until w * h) haloScore += abs((ws.bufA[i] - ws.bufB[i]).toDouble())
+            haloScore /= pxCount
+            val amountEff = (amount * (1.0f + (haloScore * 20.0).toFloat())).coerceIn(0.1f, 0.6f)
+
+            // 3) Коррекция in-place и запись назад без 8-бит квантизации (half-float, тот же буфер)
+            var idx = 0
+            var p = 0
+            for (i in 0 until (w * h)) {
+                val r0 = Half.toFloat(half[p    ])
+                val g0 = Half.toFloat(half[p + 1])
+                val b0 = Half.toFloat(half[p + 2])
+                val a0 = Half.toFloat(half[p + 3])
+                val l = L[idx]
+                val d = ws.bufA[idx] - ws.bufB[idx]; idx++
+                val k = if (d > 0f) amountEff else amountEff * 0.05f
+                val nl = (l - k * d).coerceIn(0f, 1f)
+                val scale = if (l > 1e-6f) nl / l else 1f
+                val nr = (r0 * scale).coerceIn(0f, 1f)
+                val ng = (g0 * scale).coerceIn(0f, 1f)
+                val nb = (b0 * scale).coerceIn(0f, 1f)
+                half[p    ] = Half.toHalf(nr)
+                half[p + 1] = Half.toHalf(ng)
+                half[p + 2] = Half.toHalf(nb)
+                half[p + 3] = Half.toHalf(a0.coerceIn(0f, 1f))
+                p += 4
+            }
+            // Перед записью назад позиция ShortBuffer должна быть 0
+            sb.rewind()
+            bitmap.copyPixelsFromBuffer(sb)
+            Logger.i("FILTER", "halo.removed",
+                mapOf("score" to haloScore, "amount_req" to amount, "amount_eff" to amountEff, "radius" to r, "radiusLarge" to largeR))
+            return haloScore.toFloat()
+        } finally {
+            // По завершении — подрежем слишком большой half-буфер и рабочие float-буферы
+            HalfBufferPool.trimIfOversized()
+            // Снижаем удержание памяти в длительных потоках
+            ws.maybeShrink(w * h)
         }
-
-        // 1) DoG: blur(r) - blur(1.6*r) — ближе к каноническому DoG
-        val ws = wsLocal.get().apply { ensure(w * h) }
-        gaussianBlurInto(L, w, h, r, ws.bufA, ws) // small
-        val largeR = max(1, (r * 1.6f).roundToInt())
-        gaussianBlurInto(L, w, h, largeR, ws.bufB, ws)   // large
-        var haloScore = 0.0
-
-        // 2) Адаптивная сила по средней величине DoG
-        val pxCount = (w * h).toDouble()
-        // средняя |DoG|
-        for (i in 0 until w * h) haloScore += abs((ws.bufA[i] - ws.bufB[i]).toDouble())
-        haloScore /= pxCount
-        val amountEff = (amount * (1.0f + (haloScore * 20.0).toFloat())).coerceIn(0.1f, 0.6f)
-
-        // 3) Коррекция in‑place и запись назад без 8‑бит квантизации (half‑float, тот же буфер)
-        var idx = 0
-        var p = 0
-        for (i in 0 until (w * h)) {
-            val r0 = Half.toFloat(half[p    ])
-            val g0 = Half.toFloat(half[p + 1])
-            val b0 = Half.toFloat(half[p + 2])
-            val a0 = Half.toFloat(half[p + 3])
-            val l = L[idx]
-            val d = ws.bufA[idx] - ws.bufB[idx]; idx++
-            val k = if (d > 0f) amountEff else amountEff * 0.05f
-            val nl = (l - k * d).coerceIn(0f, 1f)
-            val scale = if (l > 1e-6f) nl / l else 1f
-            val nr = (r0 * scale).coerceIn(0f, 1f)
-            val ng = (g0 * scale).coerceIn(0f, 1f)
-            val nb = (b0 * scale).coerceIn(0f, 1f)
-            half[p    ] = Half.toHalf(nr)
-            half[p + 1] = Half.toHalf(ng)
-            half[p + 2] = Half.toHalf(nb)
-            half[p + 3] = Half.toHalf(a0.coerceIn(0f, 1f))
-            p += 4
-        }
-        bitmap.copyPixelsFromBuffer(ShortBuffer.wrap(half, 0, total))
-        // По завершении — подрежем слишком большой half‑буфер и рабочие float‑буферы
-        HalfBufferPool.trimIfOversized()
-        Logger.i("FILTER", "halo.removed", mapOf("score" to haloScore, "amount_req" to amount, "amount_eff" to amountEff, "radius" to r, "radiusLarge" to largeR))
-
-        // Снижаем удержание памяти в длительных потоках
-        ws.maybeShrink(w * h)
-        return haloScore.toFloat()
     }
 
     // Простой сепарабельный гаусс с выводом в предоставленный буфер (для реюза памяти)
