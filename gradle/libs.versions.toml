@@ -12,6 +12,7 @@ lifecycle = "2.8.4"
 foundation = "1.9.1"
 ui-android = "1.7.1"
 foundation-version = "1.9.2"
+lifecycle-process = "2.9.4"
 
 [libraries]
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
@@ -29,6 +30,7 @@ kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.
 androidx-foundation = { group = "androidx.compose.foundation", name = "foundation", version.ref = "foundation" }
 androidx-ui-android = { group = "androidx.compose.ui", name = "ui-android", version.ref = "ui-android" }
 foundation = { group = "androidx.compose.foundation", name = "foundation", version.ref = "foundation-version" }
+androidx-lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "lifecycle-process" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
