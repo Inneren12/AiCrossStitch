@@ -28,12 +28,13 @@ import android.view.ViewGroup
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.cancel
 import com.appforcross.editor.analysis.Stage3Analyze
+import com.appforcross.editor.preset.Stage4Runner
 
 class DevMenuActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val REQ_PICK_IMAGE = 1001
     private val REQ_PICK_ANALYZE = 1002
-
+    private val REQ_PICK_PRESET = 1003
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // --- Программная разметка, без R ---
@@ -62,12 +63,14 @@ class DevMenuActivity : Activity() {
         val btnExport = Button(this).apply { text = "Export diagnostics (.zip)" }
         val btnStage2 = Button(this).apply { text = "Pick image & Run Stage-2" }
         val btnStage3 = Button(this).apply { text = "Pick image & Analyze (Stage-3)" }
+        val btnStage4 = Button(this).apply { text = "Pick image & PresetGate (Stage-4)" }
 
         root.addView(tvTitle)
         root.addView(row)
         root.addView(btnExport)
         root.addView(btnStage2)
         root.addView(btnStage3)
+        root.addView(btnStage4)
 
         setContentView(root)
         scope.launch {
@@ -129,6 +132,16 @@ class DevMenuActivity : Activity() {
             }
             startActivityForResult(intent, REQ_PICK_ANALYZE)
         }
+        // Stage-4: PresetGate
+        btnStage4.setOnClickListener {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            }
+            startActivityForResult(intent, REQ_PICK_PRESET)
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -157,6 +170,18 @@ class DevMenuActivity : Activity() {
             } catch (_: Exception) { /* ignore */ }
             runStage3(uri)
         }
+
+        if (requestCode == REQ_PICK_PRESET && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            try {
+                var takeFlags = (data?.flags ?: 0) and
+                        (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                if (takeFlags == 0) takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                contentResolver.takePersistableUriPermission(uri, takeFlags)
+            } catch (_: Exception) { /* ignore */ }
+            runStage4(uri)
+        }
+
     }
 
     private fun runStage2(uri: Uri) {
@@ -216,6 +241,25 @@ class DevMenuActivity : Activity() {
             } catch (e: Exception) {
                 Logger.e("ANALYZE", "stage3.fail", err = e, data = mapOf("uri" to uri.toString()))
                 Toast.makeText(this@DevMenuActivity, "Stage-3 error: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun runStage4(uri: Uri) {
+        scope.launch {
+            try {
+                val out = withContext(Dispatchers.Default) {
+                    Stage4Runner.run(this@DevMenuActivity, uri, targetWst = 240 /* по умолчанию A3/14ct коридор */)
+                }
+                Logger.i("PGATE", "stage4.result", mapOf(
+                    "preset" to out.gate.spec.id,
+                    "addons" to out.gate.spec.addons.joinToString(","),
+                    "r" to out.gate.r,
+                    "json" to out.jsonPath
+                ))
+                Toast.makeText(this@DevMenuActivity, "Stage‑4: ${out.gate.spec.id}", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Logger.e("PGATE", "stage4.fail", err = e, data = mapOf("uri" to uri.toString()))
             }
         }
     }
