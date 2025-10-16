@@ -52,6 +52,12 @@ object ImagePrep {
             // Остальные — конвертируем (возвращает новый RGBA_F16)
             else -> ColorMgmt.toLinearSrgbF16(dec.bitmap, dec.colorSpace)
         }
+        // Жёсткая защита от alias исходника: если вдруг linear == исходному bitmap и он immutable — копируем.
+        if (linear === dec.bitmap && !linear.isMutable) {
+            Logger.w("IO", "linear.alias.immutable",
+                mapOf("origExclusive" to dec.exclusive, "cfg" to (dec.bitmap.config?.toString() ?: "null")))
+            linear = dec.bitmap.copy(Bitmap.Config.RGBA_F16, /*mutable*/ true)
+        }
         // Страховка: если non-exclusive, но в пайплайн попал исходный bitmap — лог и принудительная копия.
         if (!dec.exclusive && dec.bitmap === linear) {
             Logger.w("IO", "decode.exclusive.violation", mapOf("note" to "shared-bitmap-passed-into-stage2"))

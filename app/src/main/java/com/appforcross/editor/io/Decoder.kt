@@ -147,25 +147,40 @@ object Decoder {
     private fun applyExifRotate(orientation: Int, bmp: Bitmap): Pair<Bitmap, Boolean> {
         val m = Matrix()
         when (orientation) {
-            ExifInterface.ORIENTATION_ROTATE_90  -> m.postRotate(90f)
-            ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
-            ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
+            ExifInterface.ORIENTATION_ROTATE_90  -> m.setRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> m.setRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> m.setRotate(270f)
             ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.preScale(-1f, 1f)
             ExifInterface.ORIENTATION_FLIP_VERTICAL   -> m.preScale(1f, -1f)
-            // Доп. случаи 5/7: flip H + rotate (см. AndroidX Camera TransformUtils)
-            ExifInterface.ORIENTATION_TRANSPOSE -> {
-                m.postScale(-1f, 1f)
-                m.postRotate(270f)
-            }
-            ExifInterface.ORIENTATION_TRANSVERSE -> {
-                m.postScale(-1f, 1f)
-                m.postRotate(90f)
-            }
+            // 5/7: канонический порядок — сначала rotate, затем горизонтальный flip
+            // 5 (TRANSPOSE): setRotate(+90) → postScale(-1, 1)
+            ExifInterface.ORIENTATION_TRANSPOSE   -> { m.setRotate(90f);  m.postScale(-1f, 1f) }
+            // 7 (TRANSVERSE): setRotate(+270) → postScale(-1, 1)
+            ExifInterface.ORIENTATION_TRANSVERSE  -> { m.setRotate(270f); m.postScale(-1f, 1f) }
+
             else -> return Pair(bmp, false)
         }
-        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-        return Pair(rotated, true)
-    }
+        var out = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+        // Гарантия mutable-буфера (некоторые прошивки возвращают immutable)
+        val needsMutableFix = !out.isMutable || (android.os.Build.VERSION.SDK_INT >= 26 && out.config == Bitmap.Config.HARDWARE)
+        if (needsMutableFix) {
+            // Сохраняем глубину: для F16 → RGBA_F16, иначе ARGB_8888
+            val cfg = if (android.os.Build.VERSION.SDK_INT >= 26 && (out.config == Bitmap.Config.RGBA_F16 || bmp.config == Bitmap.Config.RGBA_F16))
+                Bitmap.Config.RGBA_F16 else Bitmap.Config.ARGB_8888
+            val copy = out.copy(cfg, /*mutable*/ true)
+            // Перенесём ColorSpace, если доступен
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                val cs = out.colorSpace ?: bmp.colorSpace
+                if (cs != null) copy.setColorSpace(cs)
+            }
+            com.appforcross.editor.logging.Logger.w(
+                "IO", "rotate.result.immutable",
+                mapOf("cfg" to (out.config?.toString() ?: "null"), "fixedTo" to cfg.toString())
+            )
+            out = copy
+        }
+        return Pair(out, true)
+         }
 
     /** Однократное чтение EXIF‑ориентации (до декодирования). */
     /** EXIF-ориентация из AFD с учётом startOffset: используем поток окна ресурса. */
