@@ -34,18 +34,28 @@ object ImagePrep {
     ): PrepResult {
         // 1) Декод
         val dec = Decoder.decodeUri(ctx, uri)
-        // 2) В линейный sRGB (F16). Избегаем лишнего копирования: если уже RGBA_F16 + Linear sRGB + mutable — используем как есть.
+        // 2) Приведение к линейному sRGB (F16) с безопасностью для non-exclusive/HARDWARE.
+        val isHardware = (android.os.Build.VERSION.SDK_INT >= 26
+                && dec.bitmap.config == Bitmap.Config.HARDWARE)
+        val requireCopy = (!dec.exclusive) || isHardware
         val alreadyLinear = (android.os.Build.VERSION.SDK_INT >= 26
                 && dec.bitmap.config == Bitmap.Config.RGBA_F16
                 && dec.bitmap.colorSpace == ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
-        val linear = when {
+        var linear = when {
+            // Для разделяемых или аппаратных — всегда создаём собственный буфер
+            requireCopy && alreadyLinear -> dec.bitmap.copy(Bitmap.Config.RGBA_F16, /*mutable*/ true)
+            requireCopy && !alreadyLinear -> ColorMgmt.toLinearSrgbF16(dec.bitmap, dec.colorSpace)
+            // Эксклюзивный и уже линейный: можно использовать как есть, если он мутируем
             alreadyLinear && dec.bitmap.isMutable -> dec.bitmap
+            // Эксклюзивный, уже линейный, но immutable — скопируем в mutable
             alreadyLinear -> dec.bitmap.copy(Bitmap.Config.RGBA_F16, /*mutable*/ true)
+            // Остальные — конвертируем (возвращает новый RGBA_F16)
             else -> ColorMgmt.toLinearSrgbF16(dec.bitmap, dec.colorSpace)
         }
-        // Если вдруг Decoder в будущем вернёт non‑exclusive — зафиксируем это в логах (ожидаем exclusive=true).
+        // Страховка: если non-exclusive, но в пайплайн попал исходный bitmap — лог и принудительная копия.
         if (!dec.exclusive && dec.bitmap === linear) {
             Logger.w("IO", "decode.exclusive.violation", mapOf("note" to "shared-bitmap-passed-into-stage2"))
+            linear = dec.bitmap.copy(Bitmap.Config.RGBA_F16, /*mutable*/ true)
         }
         // Освобождаем исходник ТОЛЬКО если он эксклюзивный и это разрешено политикой.
         if (dec.bitmap !== linear && dec.exclusive && recycleDecoded) {
@@ -56,15 +66,14 @@ object ImagePrep {
         // 4) Blockiness + deblock
         val blk = Deblocking8x8.measureBlockinessLinear(linear)
         // Ранний skip: силы ~0 — не тратим проход по изображению
-        if (blk.mean < deblockThreshold * 0.5f) {
-            Logger.i("FILTER", "deblock.skipped.early", mapOf("mean" to blk.mean, "thr" to deblockThreshold))
-        } else if (blk.mean >= deblockThreshold) {
+        if (blk.mean >= deblockThreshold) {
             // сила адаптируется к измеренной блочности (простая кривуля)
             val strength = (blk.mean * 12f).coerceIn(0f, 0.7f)
             Deblocking8x8.weakDeblockInPlaceLinear(linear, strength = strength)
             Logger.i("FILTER", "deblock.applied", mapOf("mean" to blk.mean, "v" to blk.vertical, "h" to blk.horizontal, "strength" to strength))
         } else {
-            Logger.i("FILTER", "deblock.skipped", mapOf("mean" to blk.mean))
+            // Одна ветка skip без «early» — меньше шума в логах
+            Logger.i("FILTER", "deblock.skipped", mapOf("mean" to blk.mean, "thr" to deblockThreshold))
         }
         // 5) Halo removal
         val halo = HaloRemoval.removeHalosInPlaceLinear(linear, amount = 0.25f, radiusPx = 2)

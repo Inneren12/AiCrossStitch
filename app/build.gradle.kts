@@ -67,5 +67,7 @@ dependencies {
     // EXIF для поворота и метаданных
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
+    implementation("androidx.activity:activity-compose:1.9.2")
+
     implementation(project(":core"))
 }

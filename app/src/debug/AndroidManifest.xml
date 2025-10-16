@@ -1,0 +1,29 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug-only launcher alias for Developer Options -->
+        <activity-alias
+            android:name=".dev.DevMenuLauncher"
+            android:exported="true"
+            android:label="Developer Options"
+            android:icon="@drawable/ic_debug_placeholder"
+            android:targetActivity="com.appforcross.editor.dev.DevMenuActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Debug-only launcher alias for Import (beta) -->
+        <activity-alias
+            android:name=".ui.import.ImportLauncher"
+            android:exported="true"
+            android:label="Import (beta)"
+            android:icon="@drawable/ic_debug_placeholder"
+            android:targetActivity="com.appforcross.editor.ui.import.ImportActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+</application>
+    </manifest>

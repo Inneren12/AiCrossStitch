@@ -188,21 +188,25 @@ object Stage3Analyze {
             if (dqVal.size < cap) dqVal = FloatArray(cap)
         }
 
-        // Для квантилей/медиан (быстрый select без новых аллокаций)
+        // Для квантилей/медиан
         var sel = FloatArray(0)
-        fun ensureSel(n: Int) {
-            if (sel.size < n) sel = FloatArray(n)
-        }
-        // Временный буфер под |a - med| для MAD и проч.
+        var selUsed = 0
+        fun ensureSel(n: Int) { if (sel.size < n) sel = FloatArray(n) }
+        // Временный буфер под |a - med| (MAD)
         var tmpF = FloatArray(0)
+        var tmpFUsed = 0
         fun ensureTmpF(n: Int) { if (tmpF.size < n) tmpF = FloatArray(n) }
-        // Интегральные суммы в double, чтобы не плодить отрицательные дисперсии
-        var dS = DoubleArray(0)
-        var dSS = DoubleArray(0)
+        // Интегральные суммы (double) для дисперсий
+        var dS = DoubleArray(0); var dSS = DoubleArray(0)
         fun ensureIntegralD(n: Int) {
             if (dS.size < n) dS = DoubleArray(n)
             if (dSS.size < n) dSS = DoubleArray(n)
-        }
+                    }
+        // Крупные временные буферы под фильтры (dark‑channel)
+        var f1 = FloatArray(0); var f2 = FloatArray(0)
+        fun ensureF12(n: Int) { if (f1.size < n) f1 = FloatArray(n); if (f2.size < n) f2 = FloatArray(n) }
+        // Ресайклимый буфер для масок (ALPHA_8)
+        var maskBytes = ByteArray(0); fun ensureMaskBytes(n: Int) { if (maskBytes.size < n) maskBytes = ByteArray(n) }
 
     }
     private val scratchTL = ThreadLocal.withInitial { Scratch() }
@@ -326,7 +330,8 @@ object Stage3Analyze {
                     SS[id(x,y)] = upSS + rowSumSq
                 }
             }
-            return S to SS
+            // Явно возвращаем Pair для стабильного инференса типов
+            return Pair(S, SS)
         }
         fun boxVar(S: DoubleArray, SS: DoubleArray, r: Int): FloatArray {
             val out = FloatArray(w*h)
@@ -457,43 +462,61 @@ object Stage3Analyze {
     }
 
     // -------- Метрики и утилиты --------
-    // Быстрый nth-element (Quickselect) с реюзом буфера: O(n) без полной сортировки
-    private fun swap(a: FloatArray, i: Int, j: Int) {
-        val t = a[i]; a[i] = a[j]; a[j] = t
-    }
-    private fun partition(a: FloatArray, left: Int, right: Int, pivotIndex: Int): Int {
-        val pivot = a[pivotIndex]
-        swap(a, pivotIndex, right)
-        var store = left
-        var i = left
-        while (i < right) {
-            if (a[i] < pivot) {
-                swap(a, i, store)
-                store++
-            }
-            i++
+    // Быстрый nth-element с защитами для однородных полей:
+    //  - median-of-three выбор пивота
+    //  - «трёхпутевое» разбиение ( < = > ), чтобы сразу схлопывать блок равных
+    private fun swap(a: FloatArray, i: Int, j: Int) { val t = a[i]; a[i] = a[j]; a[j] = t }
+    private fun medianOf3Index(a: FloatArray, lo: Int, hi: Int): Int {
+        val mid = (lo + hi) ushr 1
+        val x = a[lo]; val y = a[mid]; val z = a[hi]
+        return if (x < y) {
+            if (y < z) mid else if (x < z) hi else lo
+        } else {
+            if (x < z) lo else if (y < z) hi else mid
         }
-        swap(a, store, right)
-        return store
+    }
+    /** Разбиение «Dutch national flag»: возвращает границы блока == pivot как Pair<lt, gt>. */
+    private fun partition3(a: FloatArray, lo0: Int, hi0: Int, pivotVal: Float): Pair<Int, Int> {
+        var lo = lo0; var i = lo0; var hi = hi0
+        while (i <= hi) {
+            val v = a[i]
+            when {
+                v < pivotVal -> { swap(a, lo, i); lo++; i++ }
+                v > pivotVal -> { swap(a, i, hi); hi-- }
+                else -> i++
+            }
+        }
+        return Pair(lo, hi)
+    }
+    private fun isUniform(a: FloatArray, len: Int): Boolean {
+        if (len <= 1) return true
+        val v0 = a[0]
+        var i = 1
+        while (i < len) { if (a[i] != v0) return false; i++ }
+        return true
     }
     private fun quickSelectInplace(a: FloatArray, left0: Int, right0: Int, n: Int): Float {
         var left = left0
         var right = right0
         var k = n
         while (true) {
-            if (left == right) return a[left]
-            val pivotIndex = (left + right) ushr 1 // mid; достаточно стабильно для наших распределений
-            val p = partition(a, left, right, pivotIndex)
+            if (left >= right) return a[left]
+            // median-of-three pivot
+            val pIdx = medianOf3Index(a, left, right)
+            val pVal = a[pIdx]
+            val (lt, gt) = partition3(a, left, right, pVal)
             when {
-                k == p -> return a[k]
-                k <  p -> right = p - 1
-                else   -> left  = p + 1
+                k < lt  -> right = lt - 1
+                k > gt  -> left  = gt + 1
+                else    -> return pVal
             }
         }
     }
     /** Перцентиль на произвольном буфере [buf] длины [len] без новых аллокаций. */
     private fun percentileOnBuffer(buf: FloatArray, len: Int, p: Double): Float {
         if (len <= 0) return 0f
+        // Ранний выход для однородных буферов
+        if (isUniform(buf, len)) return buf[0]
         val idx = ((len - 1) * p).coerceIn(0.0, (len - 1).toDouble())
         val i0 = floor(idx).toInt()
         val i1 = ceil(idx).toInt()
@@ -508,6 +531,7 @@ object Stage3Analyze {
         val s = scratch()
         s.ensureSel(a.size)
         System.arraycopy(a, 0, s.sel, 0, a.size)
+        s.selUsed = a.size
         return percentileOnBuffer(s.sel, a.size, p)
     }
     private fun quantile(a: FloatArray, p: Float) = percentile(a, p.toDouble())
@@ -526,6 +550,9 @@ object Stage3Analyze {
         val dev = s.tmpF
         var i = 0
         while (i < a.size) { dev[i] = kotlin.math.abs(a[i] - med); i++ }
+        // очистим «хвост», если ранее использовался больший объём буфера
+        if (s.tmpFUsed > a.size) java.util.Arrays.fill(dev, a.size, s.tmpFUsed, 0f)
+        s.tmpFUsed = a.size
         // На уже заполненном буфере — медиана без копий
         return percentileOnBuffer(dev, a.size, 0.5).toDouble()
     }
@@ -538,13 +565,19 @@ object Stage3Analyze {
         s.ensureSel(m)
         var j = 0
         for (i in field.indices) if (mask[i]) { s.sel[j] = field[i]; j++ }
+        // очистим «хвост» от предыдущего использования, чтобы исключить ложные чтения
+        if (s.selUsed > m) java.util.Arrays.fill(s.sel, m, s.selUsed, 0f)
+        s.selUsed = m
         return percentileOnBuffer(s.sel, m, p).toDouble()
     }
     /** Быстрый dark-channel: min по RGB → морфологическая эрозия квадратом (r) в O(N) через монотонную очередь. */
     private fun darkChannelScore(bmp: Bitmap, r:Int=7): Double {
         val w=bmp.width; val h=bmp.height; val n = w*h
         val row = IntArray(w)
-        val minRGB = FloatArray(n)
+        // Реюз буферов: minRGB → f1, tmp → f2, итог снова в f1 (без отдельного out)
+        val s = scratch()
+        s.ensureF12(n)
+        val minRGB = s.f1
         var idx = 0
         // 1) локальный минимум по каналам для каждого пикселя
         for (y in 0 until h) {
@@ -556,13 +589,12 @@ object Stage3Analyze {
             }
         }
         // 2) min-фильтр по окну (2r+1)x(2r+1): горизонтальный → вертикальный проход
-        val tmp = FloatArray(n)
-        val s = scratch()
+        val tmp = s.f2
         minFilterHorizontal(minRGB, w, h, r, tmp, s)
-        val out = FloatArray(n)
-        minFilterVertical(tmp, w, h, r, out, s)
+        // итог пишем ОБРАТНО в minRGB (f1), чтобы не аллоцировать `out`
+        minFilterVertical(tmp, w, h, r, minRGB, s)
         var sum = 0.0
-        for (i in 0 until n) sum += out[i].toDouble()
+        for (i in 0 until n) sum += minRGB[i].toDouble()
         return sum / n
     }
     private fun minFilterHorizontal(src: FloatArray, w:Int, h:Int, r:Int, dst: FloatArray, s: Scratch) {
@@ -631,10 +663,13 @@ object Stage3Analyze {
         }
     }
     private fun maskToBitmap(mask: BooleanArray, w:Int, h:Int): Bitmap {
-        val out = Bitmap.createBitmap(w,h,Bitmap.Config.ALPHA_8)
-        val arr = ByteArray(mask.size)
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        val s = scratch()
+        s.ensureMaskBytes(mask.size)
+        val arr = s.maskBytes
         for (i in mask.indices) arr[i] = if (mask[i]) 0xFF.toByte() else 0x00
-        out.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(arr))
+        // используем wrap с ограничением длины, реюзая один и тот же массив
+        out.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(arr, 0, mask.size))
         return out
     }
     private fun maskPct(mask: BooleanArray): Double = mask.count { it }.toDouble() / mask.size
@@ -700,7 +735,8 @@ object Stage3Analyze {
         votes++; if (m.edgeRate >= 0.06 && m.colors5bit <= 128 && m.varLap >= 0.002) scoreDiscrete++
         // 4) Фото-градиенты: высокая энтропия/градиенты → PHOTO
         votes++; if (m.flatPct <= 0.55 && m.colors5bit >= 128) { /* favor photo */ } else scoreDiscrete++
-        val conf = abs(scoreDiscrete - (votes - scoreDiscrete)).toDouble()/votes
+        val diffVotes = kotlin.math.abs(scoreDiscrete - (votes - scoreDiscrete))
+        val conf = diffVotes.toDouble() / votes.toDouble()
         val kind = if (scoreDiscrete > votes/2) SceneKind.DISCRETE else SceneKind.PHOTO
         val subtype = when {
             kind==SceneKind.DISCRETE && m.checker2x2 >= 0.06 -> "PIXEL_ART"

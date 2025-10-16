@@ -48,7 +48,7 @@ fun EditorScreen(vm: EditorViewModel) {
         Divider()
 
         when (current) {
-            EditorTab.IMPORT -> ImportTab(vm)
+            EditorTab.IMPORT -> com.appforcross.editor.ui.tabs.ImportTab()
             EditorTab.PREPROCESS -> PreprocessTab(vm)
             EditorTab.SIZE -> SizeTab(vm)
             EditorTab.PALETTE -> PaletteTab(vm)
