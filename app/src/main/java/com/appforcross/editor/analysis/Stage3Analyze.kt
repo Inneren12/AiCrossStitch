@@ -59,6 +59,15 @@ object Stage3Analyze {
         // 0) Декодим исходник (с EXIF-поворотом) и строим превью ≤1024
         val dec = Decoder.decodeUri(ctx, uri)
         val preview = buildPreview(dec.bitmap, PREVIEW_LONG_SIDE)
+        // Как только построили уменьшенное превью — освобождаем исходный буфер,
+        // иначе до сборки мусора держим в памяти оба битмапа (оригинал+preview).
+        if (preview !== dec.bitmap && dec.exclusive) {
+            try {
+                dec.bitmap.recycle()
+            } catch (_: Throwable) {
+                Logger.w("ANALYZE", "preview.recycle_failed", mapOf("exclusive" to dec.exclusive))
+            }
+        }
         Logger.i("ANALYZE", "preview.built", mapOf("w" to preview.width, "h" to preview.height))
 
         // 1) Подготовка плоскостей (linear luma + OKLab A/B для шума/каста)
@@ -215,7 +224,13 @@ object Stage3Analyze {
         var f1 = FloatArray(0); var f2 = FloatArray(0)
         fun ensureF12(n: Int) { if (f1.size < n) f1 = FloatArray(n); if (f2.size < n) f2 = FloatArray(n) }
         // Ресайклимый буфер для масок (ALPHA_8)
-        var maskBytes = ByteArray(0); fun ensureMaskBytes(n: Int) { if (maskBytes.size < n) maskBytes = ByteArray(n) }
+        var maskBytes = ByteArray(0); var maskBytesUsed = 0
+        fun ensureMaskBytes(n: Int) {
+            if (maskBytes.size < n) {
+                maskBytes = ByteArray(n)
+                maskBytesUsed = 0
+            }
+        }
 
     }
     private val scratchTL = ThreadLocal.withInitial { Scratch() }
@@ -444,7 +459,9 @@ object Stage3Analyze {
         dilateInto(a, b, w, h, radius)     // open = erode → dilate
         dilateInto(b, a, w, h, radius)
         erodeInto(a, b, w, h, radius)      // close = dilate → erode
-        return b.copyOf() // итог как новый массив; внутри — без лишних аллокаций
+        // bool-буферы scratch могут быть больше текущего размера маски (если предыдущий кадр был крупнее),
+        // поэтому обязательно обрезаем до n, иначе вернём массив с «хвостом» из старых данных, и проценты/битмапы поплывут.
+        return b.copyOf(n)
     }
     private fun erodeInto(src:BooleanArray, dst:BooleanArray, w:Int, h:Int, radius:Int) {
         for (y in 0 until h) for (x in 0 until w) {
@@ -670,12 +687,30 @@ object Stage3Analyze {
     }
     private fun maskToBitmap(mask: BooleanArray, w:Int, h:Int): Bitmap {
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        val stride = out.rowBytes
+        val required = stride * h
         val s = scratch()
-        s.ensureMaskBytes(mask.size)
+        s.ensureMaskBytes(required)
         val arr = s.maskBytes
-        for (i in mask.indices) arr[i] = if (mask[i]) 0xFF.toByte() else 0x00
+        if (s.maskBytesUsed > required) {
+            java.util.Arrays.fill(arr, required, s.maskBytesUsed, 0.toByte())
+        }
+        var src = 0
+        var dst = 0
+        for (y in 0 until h) {
+            var x = 0
+            while (x < w) {
+                arr[dst + x] = if (mask[src++]) 0xFF.toByte() else 0x00
+                x++
+            }
+            if (stride > w) {
+                java.util.Arrays.fill(arr, dst + w, dst + stride, 0.toByte())
+            }
+            dst += stride
+        }
+        s.maskBytesUsed = required
         // используем wrap с ограничением длины, реюзая один и тот же массив
-        out.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(arr, 0, mask.size))
+        out.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(arr, 0, required))
         return out
     }
     private fun maskPct(mask: BooleanArray): Double = mask.count { it }.toDouble() / mask.size
