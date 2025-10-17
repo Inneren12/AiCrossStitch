@@ -9,6 +9,11 @@ android {
     namespace = "com.appforcross.app"
     compileSdk = 35
 
+    testOptions {
+       unitTests.isIncludeAndroidResources = true
+       unitTests.isReturnDefaultValues = true
+   }
+
     defaultConfig {
         applicationId = "com.appforcross.app"
         minSdk = 31
@@ -78,4 +83,10 @@ dependencies {
     // опционально — если надо дергать Android API на JVM (без эмулятора)
     testImplementation("org.robolectric:robolectric:4.12.1")
     implementation(project(":core"))
+
+testImplementation("junit:junit:4.13.2")
+  testImplementation("org.robolectric:robolectric:4.12.2")
+  testImplementation("com.google.truth:truth:1.4.2")
+  testImplementation("androidx.test:core-ktx:1.6.1")
+
 }
