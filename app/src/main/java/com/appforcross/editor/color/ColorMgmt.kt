@@ -42,17 +42,19 @@ object ColorMgmt {
             return cp
         }
 
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.RGBA_F16)
-        if (Build.VERSION.SDK_INT >= 26) {
-            out.setColorSpace(ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
-        }
+        // сразу создаём RGBA_F16 c нужным CS (без setColorSpace!)
+        val out = if (Build.VERSION.SDK_INT >= 26)
+            Bitmap.createBitmap(w, h, Bitmap.Config.RGBA_F16, /*hasAlpha=*/true, ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
+        else Bitmap.createBitmap(w, h, Bitmap.Config.RGBA_F16)
+
         val effectiveCs = srcBitmap.colorSpace ?: srcCs
         if (Build.VERSION.SDK_INT >= 26 && effectiveCs != null) {
             // Полностью плавающая обработка: читаем float-компоненты и пишем half‑float без 8‑бит квантизации.
             // Конвертация блоком, без getColor на пиксель
             val dst = ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
-            val connector = if (effectiveCs == dst) null else ColorSpace.connect(effectiveCs, dst)
-            val total = w * h * 4
+            // ⬇️ src должен быть non-null: используем effectiveCs вместо nullable srcCs
+            val connector = ColorSpace.connect(effectiveCs, dst)
+                val total = w * h * 4
             val half = HalfBufferPool.obtain(total)
             try {
                 when (srcBitmap.config) {

@@ -27,6 +27,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import com.appforcross.editor.prescale.PreScaleRunner
+import com.appforcross.editor.quant.QuantizeRunner
+import kotlin.math.min
 
 @Composable
 fun ImportTab() {
@@ -43,6 +45,12 @@ fun ImportTab() {
 
     // Результат PreScale
     var preOut by remember { mutableStateOf<PreScaleRunner.Output?>(null) }
+
+    // Параметры и результат Quantize
+    var kMax by rememberSaveable { mutableStateOf(28f) }
+    var qOut by remember { mutableStateOf<QuantizeRunner.Output?>(null) }
+    var enableOrdered by rememberSaveable { mutableStateOf(true) }
+    var enableFS by rememberSaveable { mutableStateOf(true) }
 
     // Picker
     val openDoc = rememberLauncherForActivityResult(
@@ -213,6 +221,75 @@ fun ImportTab() {
             Text("Banding: ${fmt(o.fr.banding)} • ΔE95: ${fmt(o.fr.de95)}")
             Text("Pass: ${o.passed}")
             Text("PNG: ${o.pngPath}", style = MaterialTheme.typography.bodySmall)
+        }
+
+        // ---------- Quantize ----------
+        if (preOut != null && analyze != null && gate != null) {
+            HorizontalDivider()
+            Text("Quantize", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Text("Max colors (K): ${kMax.roundToInt()}")
+            Slider(
+                value = kMax,
+                onValueChange = { kMax = it },
+                valueRange = 12f..44f,
+                steps = 44 - 12 - 1
+            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = enableOrdered, onCheckedChange = { enableOrdered = it })
+                    Text("Ordered (Sky/Flat/Skin)")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = enableFS, onCheckedChange = { enableFS = it })
+                    Text("FS (HiTex, edge‑aware)")
+                }
+            }
+            OutlinedButton(
+                enabled = !busy,
+                onClick = {
+                    val pre = preOut ?: return@OutlinedButton
+                    val a = analyze ?: return@OutlinedButton
+                    val g = gate ?: return@OutlinedButton
+                    scope.launch {
+                        busy = true; err = null
+                        try {
+                            val out = withContext(Dispatchers.Default) {
+                                QuantizeRunner.run(
+                                    ctx = ctx,
+                                    preScalePng = pre.pngPath,
+                                    analyze = a,
+                                    gate = g,
+                                    opt = QuantizeRunner.Options(
+                                        kStart = min(16, kMax.roundToInt()),
+                                        kMax = kMax.roundToInt(),
+                                        deltaEMin = 3.0,
+                                        useOrdered = enableOrdered,
+                                        useFS = enableFS
+                                    )
+                                )
+                            }
+                            qOut = out
+                            Logger.i("UI", "IMPORT.quant.done", mapOf(
+                                "k" to out.k, "deMin" to out.deMin, "deMed" to out.deMed,
+                                "avgErr" to out.avgErr, "png" to out.colorPng
+                            ))
+                        } catch (e: Exception) {
+                            err = "Quantize failed: ${e}"
+                            com.appforcross.editor.logging.Logger.e("UI","IMPORT.quant.fail", err = e)
+                        } finally { busy = false }
+                    }
+                }
+            ) { Text("Run Quantize") }
+        }
+        qOut?.let { q ->
+            Spacer(Modifier.height(8.dp))
+            Text("Palette K: ${q.k}")
+            Text("ΔE min / med: ${fmt(q.deMin)} / ${fmt(q.deMed)}")
+            Text("Avg ΔE: ${fmt(q.avgErr)}")
+            Text("Out: ${q.colorPng}")
+            Text("Index: ${q.indexBin}")
+            Text("Palette: ${q.paletteJson}")
         }
 
         err?.let {

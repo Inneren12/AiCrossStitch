@@ -9,6 +9,8 @@ import com.appforcross.editor.preset.PresetGateResult
 import com.appforcross.editor.preset.PresetSpec
 import com.appforcross.editor.preset.ScaleFilter
 import kotlin.math.*
+import android.graphics.ColorSpace
+import android.os.Build
 
 object PreScale {
     data class FR(
@@ -46,21 +48,20 @@ object PreScale {
         masksPrev: Masks,
         targetWst: Int
     ): Result {
-        // Толерантность: если вдруг не RGBA_F16 — конвертируем (лучше, чем упасть).
-        val src0: Bitmap = if (linearF16.config == Bitmap.Config.RGBA_F16) {
-            linearF16
-        } else {
-                Logger.w("PRESCALE", "force.to_f16", mapOf("from" to linearF16.config.toString()))
-            // Полагаем sRGB и переводим в линейный F16
-            val w = linearF16.width; val h = linearF16.height
-            val out = Bitmap.createBitmap(w, h, Bitmap.Config.RGBA_F16)
-            val row = IntArray(w)
-            for (y in 0 until h) {
-                linearF16.getPixels(row, 0, w, 0, y, w, 1)
-                out.setPixels(row, 0, w, 0, y, w, 1)
+        // Гарантируем: далее только LINEAR_SRGB RGBA_F16
+        val src0: Bitmap = run {
+            val isF16  = (linearF16.config == Bitmap.Config.RGBA_F16)
+            val isLin  = (Build.VERSION.SDK_INT < 26) ||
+                    (linearF16.colorSpace == ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
+            if (isF16 && isLin) {
+                linearF16
+            } else {
+                Logger.w("PRESCALE", "force.to_linear_f16",
+                    mapOf("from" to linearF16.config.toString(),
+                        "cs" to (if (Build.VERSION.SDK_INT>=26) linearF16.colorSpace?.name ?: "unknown" else "api<26")))
+                ColorMgmt.toLinearSrgbF16(linearF16, if (Build.VERSION.SDK_INT>=26) linearF16.colorSpace else null)
             }
-            out
-            }
+        }
         val w = src0.width
         val h = src0.height
         // вычислим целевую высоту в стежках с сохранением пропорций
@@ -76,7 +77,9 @@ object PreScale {
         val mHiSrc   = orMask(upscaleMaskTo(src0, masksPrev.hiTexFine), upscaleMaskTo(src0, masksPrev.hiTexCoarse))
 
         // 1) Адресная фильтрация в исходном размере
-        val src = src0.copy(Bitmap.Config.RGBA_F16, true)
+        // copy() сохранит CS из src0 (он уже LINEAR_SRGB)
+        val src = src0.copy(Bitmap.Config.RGBA_F16, /*mutable*/ true)
+
         lumaNR(src, preset.nr, mEdgeSrc, mFlatSrc)           // люма NR
         chromaNR(src, preset.nr)                             // хрома NR (упрощённо)
         textureSmooth(src, preset.texture, mFlatSrc, mHiSrc) // «анти‑песок» по плоским
@@ -123,7 +126,8 @@ object PreScale {
         ))
 
         // 5) Пост‑обработка на целевом размере
-        val out1 = out0.copy(Bitmap.Config.RGBA_F16, true)
+        // copy() сохранит LINEAR_SRGB
+        val out1 = out0.copy(Bitmap.Config.RGBA_F16, /*mutable*/ true)
         if (preset.post.dering) deRingingAlongEdges(out1)
         if (preset.post.localContrast) localContrastOnHiTex(out1)
 
@@ -336,7 +340,9 @@ object PreScale {
         }
 
     private fun resizeMitchell(src: Bitmap, W:Int, H:Int, ox:Double, oy:Double): Bitmap {
-        val out = Bitmap.createBitmap(W,H,Bitmap.Config.RGBA_F16)
+        val out = if (Build.VERSION.SDK_INT >= 26)
+            Bitmap.createBitmap(W, H, Bitmap.Config.RGBA_F16, true, ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
+        else Bitmap.createBitmap(W, H, Bitmap.Config.RGBA_F16)
         val w = src.width.toDouble(); val h = src.height.toDouble()
         val sx = w / W; val sy = h / H
         val row = IntArray(src.width)
@@ -351,7 +357,9 @@ object PreScale {
         return out
     }
     private fun resizeLanczos3(src: Bitmap, W:Int, H:Int, ox:Double, oy:Double): Bitmap {
-        val out = Bitmap.createBitmap(W,H,Bitmap.Config.RGBA_F16)
+        val out = if (Build.VERSION.SDK_INT >= 26)
+            Bitmap.createBitmap(W, H, Bitmap.Config.RGBA_F16, true, ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
+        else Bitmap.createBitmap(W, H, Bitmap.Config.RGBA_F16)
         val w = src.width.toDouble(); val h = src.height.toDouble()
         val sx = w / W; val sy = h / H
         for (y in 0 until H) {
