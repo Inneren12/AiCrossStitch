@@ -213,8 +213,13 @@ object QuantizeRunner {
     // -------- utils --------
     private fun resampleMasks(m: com.appforcross.editor.analysis.Masks, w:Int, h:Int): com.appforcross.editor.analysis.Masks {
         fun scaleToAlpha(src: Bitmap): Bitmap {
-            val scaled = Bitmap.createScaledBitmap(src, w, h, true)
-            if (scaled.config == Bitmap.Config.ALPHA_8 && scaled.isMutable) return scaled
+            val scaled = if (src.width == w && src.height == h) {
+                src
+            } else {
+                Bitmap.createScaledBitmap(src, w, h, /* filter = */ false)
+            }
+            val shouldRecycle = scaled !== src
+            if (scaled.config == Bitmap.Config.ALPHA_8 && scaled.isMutable && shouldRecycle) return scaled
             val out = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
             val row = IntArray(w)
             for (y in 0 until h) {
@@ -225,7 +230,9 @@ object QuantizeRunner {
                 }
                 out.setPixels(row, 0, w, 0, y, w, 1)
             }
-            scaled.recycle()
+            if (shouldRecycle) {
+                scaled.recycle()
+            }
             return out
         }
         return com.appforcross.editor.analysis.Masks(
