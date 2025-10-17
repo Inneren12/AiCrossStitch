@@ -14,7 +14,9 @@ data class AnalyzeResult(
     val preview: Bitmap,
     val metrics: Metrics,
     val masks: Masks,
-    val decision: SceneDecision
+    val decision: SceneDecision,
+    val sourceWidth: Int,
+    val sourceHeight: Int
     )
 
 data class Masks(
@@ -168,7 +170,14 @@ object Stage3Analyze {
             }
         } catch (_: Exception) { /* diag-сохранение опционально */ }
 
-        return AnalyzeResult(preview, metrics, masks, decision)
+        return AnalyzeResult(
+            preview = preview,
+            metrics = metrics,
+            masks = masks,
+            decision = decision,
+            sourceWidth = dec.width,
+            sourceHeight = dec.height
+        )
     }
 
     // -------- Scratch-пулы для снижения аллокаций (ThreadLocal) --------
@@ -239,25 +248,18 @@ object Stage3Analyze {
                 val r = srgbToLinear(rf); val g = srgbToLinear(gf); val bl = srgbToLinear(bf)
                 l[idx] = (0.2126f*r + 0.7152f*g + 0.0722f*bl)
                 // OKLab A/B (приближённо, без конвертора)
-                val ok = rgbLinearToOKLab(r, g, bl)
-                a[idx] = ok[1]; b[idx] = ok[2]
+                val lComp = 0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * bl
+                val mComp = 0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * bl
+                val sComp = 0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * bl
+                val l_ = cbrtF(lComp); val m_ = cbrtF(mComp); val s_ = cbrtF(sComp)
+                a[idx] = 1.9779984951f * l_ - 2.4285922050f * m_ + 0.4505937099f * s_
+                b[idx] = 0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_
                 idx++
             }
         }
         return WorkingPlanes(l, a, b)
     }
 
-    // OKLab из линейного RGB (сокращённая форма)
-    private fun rgbLinearToOKLab(r: Float, g: Float, b: Float): FloatArray {
-        val l = 0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b
-        val m = 0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b
-        val s = 0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b
-        val l_ = cbrtF(l); val m_ = cbrtF(m); val s_ = cbrtF(s)
-        val L = 0.2104542553f * l_ + 0.7936177850f * m_ - 0.0040720468f * s_
-        val A = 1.9779984951f * l_ - 2.4285922050f * m_ + 0.4505937099f * s_
-        val B = 0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_
-        return floatArrayOf(L, A, B)
-    }
     // Знако-сохраняющий корень кубический — корректнее для OKLab (LMS могут быть < 0).
     private fun cbrtF(x: Float): Float = when {
         x == 0f -> 0f
@@ -383,8 +385,12 @@ object Stage3Analyze {
                 val c=row[x]
                 val r=Color.red(c); val g=Color.green(c); val b=Color.blue(c)
                 val yv = 0.299*r + 0.587*g + 0.114*b
-                val cb = (-0.168736*r - 0.331264*g + 0.5*b + 128).toInt()
-                val cr = (0.5*r - 0.418688*g - 0.081312*b + 128).toInt()
+                val cb = (-0.168736*r - 0.331264*g + 0.5*b + 128)
+                    .roundToInt()
+                    .coerceIn(0, 255)
+                val cr = (0.5*r - 0.418688*g - 0.081312*b + 128)
+                    .roundToInt()
+                    .coerceIn(0, 255)
                 val cond = r>95 && g>40 && b>20 &&
                         (max(max(r,g),b) - min(min(r,g),b) > 15) &&
                         abs(r-g) > 15 && r>g && r>b &&
@@ -674,7 +680,35 @@ object Stage3Analyze {
     }
     private fun maskPct(mask: BooleanArray): Double = mask.count { it }.toDouble() / mask.size
     private fun savePng(bmp: Bitmap, file: java.io.File) {
-        java.io.FileOutputStream(file).use { fos -> bmp.compress(Bitmap.CompressFormat.PNG, 100, fos) }
+        val toSave = if (bmp.config == Bitmap.Config.ALPHA_8) {
+            val w = bmp.width
+            val h = bmp.height
+            val stride = bmp.rowBytes
+            val alpha = ByteArray(stride * h)
+            val buf = java.nio.ByteBuffer.wrap(alpha)
+            bmp.copyPixelsToBuffer(buf)
+            val pixels = IntArray(w * h)
+            var src = 0
+            var dst = 0
+            for (y in 0 until h) {
+                var x = 0
+                while (x < w) {
+                    val aByte = alpha[src + x].toInt() and 0xFF
+                    val argb = (aByte shl 24) or (aByte shl 16) or (aByte shl 8) or aByte
+                    pixels[dst++] = argb
+                    x++
+                }
+                src += stride
+            }
+            Bitmap.createBitmap(pixels, 0, w, w, h, Bitmap.Config.ARGB_8888)
+        } else bmp
+        try {
+            java.io.FileOutputStream(file).use { fos ->
+                toSave.compress(Bitmap.CompressFormat.PNG, 100, fos)
+            }
+        } finally {
+            if (toSave !== bmp) toSave.recycle()
+        }
     }
 
     private fun colors5bitAndTop8(bmp: Bitmap): Pair<Int, Double> {
