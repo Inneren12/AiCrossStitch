@@ -28,7 +28,16 @@ import kotlin.math.roundToInt
 import com.appforcross.editor.prescale.PreScaleRunner
 import com.appforcross.editor.quant.QuantizeRunner
 import kotlin.math.min
+import com.appforcross.editor.catalog.CatalogMapRunner
+import androidx.compose.material3.ExperimentalMaterial3Api
+import com.appforcross.editor.catalog.ThreadCatalogs
+import com.appforcross.editor.pattern.PatternRunner
+import com.appforcross.editor.export.PdfExportRunner
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ImportTab() {
     val ctx = LocalContext.current
@@ -51,7 +60,78 @@ fun ImportTab() {
     var qOut by remember { mutableStateOf<QuantizeRunner.Output?>(null) }
     var enableOrdered by rememberSaveable { mutableStateOf(true) }
     var enableFS by rememberSaveable { mutableStateOf(true) }
+    // Catalog map
+    var brand by rememberSaveable { mutableStateOf("DMC") }
+    var allowBlends by rememberSaveable { mutableStateOf(true) }
+    var catOut by remember { mutableStateOf<CatalogMapRunner.Output?>(null) }
 
+    // Pattern
+    var patOut by remember { mutableStateOf<PatternRunner.Output?>(null) }
+    var minRunFlat by rememberSaveable { mutableStateOf(4) }
+    var minRunEdge by rememberSaveable { mutableStateOf(3) }
+
+    // Export PDF
+    var cellSizeMm by rememberSaveable { mutableStateOf("3.0") }
+    var marginMm by rememberSaveable { mutableStateOf("10") }
+    var overlap by rememberSaveable { mutableStateOf("8") }
+    var renderSymbols by rememberSaveable { mutableStateOf(true) }
+    var pageA3 by rememberSaveable { mutableStateOf(false) }
+    var exportPath by remember { mutableStateOf<String?>(null) }
+
+    // PDF Preview
+    var previewPage by rememberSaveable { mutableStateOf(1) }
+    var totalPages by remember { mutableStateOf(0) }
+    var previewBmp by remember { mutableStateOf<Bitmap?>(null) }
+    var previewBusy by remember { mutableStateOf(false) }
+
+    // Save As launcher (SAF)
+    val saveAs = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/pdf")
+    ) { uri: Uri? ->
+        val q = qOut; val p = patOut
+        if (uri != null && q != null && p != null) {
+            scope.launch {
+                busy = true; err = null
+                try {
+                    val bytes = withContext(Dispatchers.Default) {
+                        PdfExportRunner.runToBytes(
+                            ctx = ctx,
+                            indexBinPath = p.indexBin,
+                            colorPngPath = q.colorPng,
+                            palette = q.palette,
+                            legendJsonPath = p.legendJson,
+                            opt = PdfExportRunner.Options(
+                                page = if (pageA3) PdfExportRunner.PageSize.A3 else PdfExportRunner.PageSize.A4,
+                                orientation = PdfExportRunner.Orientation.PORTRAIT,
+                                cellSizeMm = cellSizeMm.toFloatOrNull() ?: 3.0f,
+                                marginMm = marginMm.toFloatOrNull() ?: 10f,
+                                overlapCells = overlap.toIntOrNull() ?: 8,
+                                boldEvery = 10,
+                                render = if (renderSymbols) PdfExportRunner.RenderMode.SYMBOLS else PdfExportRunner.RenderMode.COLOR,
+                                includeLegend = true
+                            )
+                        )
+                    }
+                    ctx.contentResolver.openOutputStream(uri, "w")?.use { it.write(bytes.bytes) }
+                    exportPath = uri.toString()
+                } catch (e: Exception) {
+                    err = "Save As failed: $e"
+                    com.appforcross.editor.logging.Logger.e("UI","EXPORT.saveas.fail", err = e)
+                } finally { busy = false }
+            }
+        }
+    }
+
+    var brands by remember { mutableStateOf(listOf("DMC")) }
+    var brandMenu by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val avail: List<String> = ThreadCatalogs.listAvailable(ctx)
+        brands = if (avail.isNotEmpty()) avail else listOf("DMC")
+        if (!brands.contains(brand)) {
+            // подстрахуемся на случай пустого списка
+            brand = brands.firstOrNull() ?: "DMC"
+        }
+    }
     // Picker
     val openDoc = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -292,6 +372,249 @@ fun ImportTab() {
             Text("Out: ${q.colorPng}")
             Text("Index: ${q.indexBin}")
             Text("Palette: ${q.paletteJson}")
+        }
+
+        // ---------- Catalog Map ----------
+        if (qOut != null) {
+            HorizontalDivider()
+            Text("Catalog", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            // простейший селектор бренда (одна опция пока)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Brand:")
+                ExposedDropdownMenuBox(
+                    expanded = brandMenu,
+                    onExpandedChange = { brandMenu = !brandMenu }
+                ) {
+                    OutlinedTextField(
+                        value = brand,
+                        onValueChange = {},
+                        readOnly = true,
+                        modifier = Modifier.menuAnchor(),
+                        label = { Text("Palette") }
+                    )
+                    ExposedDropdownMenu(
+                        expanded = brandMenu,
+                        onDismissRequest = { brandMenu = false }
+                    ) {
+                        brands.forEach { b ->
+                            DropdownMenuItem(
+                                text = { Text(b) },
+                                onClick = { brand = b; brandMenu = false }
+                            )
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = allowBlends, onCheckedChange = { allowBlends = it })
+                    Text("Allow blends (1:1)")
+                }
+            }
+            OutlinedButton(
+                enabled = !busy,
+                onClick = {
+                    val q = qOut ?: return@OutlinedButton
+                    scope.launch {
+                        busy = true; err = null
+                        try {
+                            val out = withContext(Dispatchers.Default) {
+                                CatalogMapRunner.run(
+                                    ctx = ctx,
+                                    palette = q.palette,
+                                    brand = brand,
+                                    options = com.appforcross.editor.catalog.CatalogMapOptions(
+                                        allowBlends = allowBlends,
+                                        maxBlends = 4,
+                                        blendPenalty = 0.7
+                                    )
+                                )
+                            }
+                            catOut = out
+                        } catch (e: Exception) {
+                            err = "Catalog map failed: ${e}"
+                            com.appforcross.editor.logging.Logger.e("UI","IMPORT.catalog.fail", err = e)
+                        } finally { busy = false }
+                    }
+                }
+            ) { Text("Map to $brand") }
+        }
+        catOut?.let { c ->
+            Spacer(Modifier.height(8.dp))
+            Text("Brand: ${c.brand}")
+            Text("AvgΔE / MaxΔE: ${fmt(c.avgDE)} / ${fmt(c.maxDE)}")
+            Text("Blends used: ${c.blends}")
+            Text("JSON: ${c.jsonPath}")
+        }
+
+        // ---------- Pattern ----------
+        if (qOut != null) {
+            HorizontalDivider()
+            Text("Pattern", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                OutlinedTextField(
+                    value = minRunFlat.toString(),
+                    onValueChange = { v -> v.toIntOrNull()?.let { minRunFlat = it.coerceAtLeast(1) } },
+                    label = { Text("Min‑run flat") },
+                    modifier = Modifier.width(140.dp)
+                )
+                OutlinedTextField(
+                    value = minRunEdge.toString(),
+                    onValueChange = { v -> v.toIntOrNull()?.let { minRunEdge = it.coerceAtLeast(1) } },
+                    label = { Text("Min‑run edge") },
+                    modifier = Modifier.width(140.dp)
+                )
+            }
+            OutlinedButton(
+                enabled = !busy,
+                onClick = {
+                    val q = qOut ?: return@OutlinedButton
+                    val cat = catOut // может быть null
+                    scope.launch {
+                        busy = true; err = null
+                        try {
+                            val out = withContext(Dispatchers.Default) {
+                                PatternRunner.run(
+                                    ctx = ctx,
+                                    palette = q.palette,
+                                    indexBinPath = q.indexBin,
+                                    colorPngPath = q.colorPng,
+                                    catalogJsonPath = cat?.jsonPath,
+                                    opt = PatternRunner.Options(
+                                        minRunFlat = minRunFlat,
+                                        minRunEdge = minRunEdge
+                                    )
+                                )
+                            }
+                            patOut = out
+                        } catch (e: Exception) {
+                            err = "Pattern build failed: ${e}"
+                            com.appforcross.editor.logging.Logger.e("UI","IMPORT.pattern.fail", err = e)
+                        } finally { busy = false }
+                    }
+                }
+            ) { Text("Build Pattern") }
+        }
+        patOut?.let { p ->
+            Spacer(Modifier.height(8.dp))
+            Text("Thread changes /100: ${fmt(p.changesPer100)}")
+            Text("Small islands /1000: ${fmt(p.smallIslandsPer1000)}")
+            Text("Run median: ${fmt(p.runMedian)}")
+            Text("Index: ${p.indexBin}")
+            Text("Legend: ${p.legendJson}")
+            Text("Preview: ${p.previewPng}")
+        }
+
+        // ---------- PDF Preview (before export) ----------
+        if (qOut != null && patOut != null) {
+            HorizontalDivider()
+            Text("PDF Preview", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            // ререндер превью при изменении параметров
+            LaunchedEffect(qOut?.colorPng, patOut?.indexBin, cellSizeMm, marginMm, overlap, renderSymbols, pageA3, previewPage) {
+                val q = qOut!!; val p = patOut!!
+                previewBusy = true
+                try {
+                    val prev = withContext(Dispatchers.Default) {
+                        PdfExportRunner.renderPreviewBitmap(
+                            ctx = ctx,
+                            indexBinPath = p.indexBin,
+                            colorPngPath = q.colorPng,
+                            palette = q.palette,
+                            legendJsonPath = p.legendJson,
+                            opt = PdfExportRunner.Options(
+                                page = if (pageA3) PdfExportRunner.PageSize.A3 else PdfExportRunner.PageSize.A4,
+                                orientation = PdfExportRunner.Orientation.PORTRAIT,
+                                cellSizeMm = cellSizeMm.toFloatOrNull() ?: 3.0f,
+                                marginMm = marginMm.toFloatOrNull() ?: 10f,
+                                overlapCells = overlap.toIntOrNull() ?: 8,
+                                boldEvery = 10,
+                                render = if (renderSymbols) PdfExportRunner.RenderMode.SYMBOLS else PdfExportRunner.RenderMode.COLOR,
+                                includeLegend = true
+                            ),
+                            pageIndex = previewPage.coerceAtLeast(1),
+                            maxSidePx = 1400
+                        )
+                    }
+                    totalPages = prev.totalPages
+                    if (previewPage > totalPages) previewPage = totalPages
+                    previewBmp = prev.bitmap
+                } catch (e: Exception) {
+                    err = "Preview failed: $e"
+                    com.appforcross.editor.logging.Logger.e("UI","EXPORT.preview.fail", err = e)
+                } finally {
+                    previewBusy = false
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(enabled = !previewBusy && previewPage > 1, onClick = { previewPage = (previewPage - 1).coerceAtLeast(1) }) {
+                    Text("◀ Prev")
+                }
+                Text("Page $previewPage / ${maxOf(1, totalPages)}")
+                OutlinedButton(enabled = !previewBusy && (previewPage < maxOf(1, totalPages)), onClick = { previewPage = (previewPage + 1).coerceAtMost(maxOf(1,totalPages)) }) {
+                    Text("Next ▶")
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Box(Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 520.dp)) {
+                val bm = previewBmp
+                if (bm != null) {
+                    Image(bm.asImageBitmap(), contentDescription = "PDF preview", modifier = Modifier.fillMaxSize())
+                } else {
+                    Text(if (previewBusy) "Rendering preview…" else "Preview not available")
+                }
+            }
+        }
+
+        // ---------- Export (PDF) ----------
+        if (qOut != null && patOut != null) {
+            HorizontalDivider()
+            Text("Export (PDF)", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = cellSizeMm,
+                    onValueChange = { cellSizeMm = it.filter { ch -> ch.isDigit() || ch=='.' } },
+                    label = { Text("Cell size, mm") },
+                    modifier = Modifier.width(140.dp)
+                )
+                OutlinedTextField(
+                    value = marginMm,
+                    onValueChange = { marginMm = it.filter { ch -> ch.isDigit() || ch=='.' } },
+                    label = { Text("Margins, mm") },
+                    modifier = Modifier.width(140.dp)
+                )
+                OutlinedTextField(
+                    value = overlap,
+                    onValueChange = { overlap = it.filter { ch -> ch.isDigit() } },
+                    label = { Text("Overlap, cells") },
+                    modifier = Modifier.width(140.dp)
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = renderSymbols, onCheckedChange = { renderSymbols = it })
+                    Text("Symbols (off = Colors)")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = pageA3, onCheckedChange = { pageA3 = it })
+                    Text("A3 (off = A4)")
+                }
+            }
+            OutlinedButton(
+                enabled = !busy,
+                onClick = {
+                    val q = qOut ?: return@OutlinedButton
+                    val p = patOut ?: return@OutlinedButton
+                    // "Сохранить как…" через SAF
+                    val defaultName = "AiCrossStitch_pattern.pdf"
+                    saveAs.launch(defaultName)
+                }
+            ) { Text("Save as… PDF") }
+        }
+        exportPath?.let { path ->
+            Spacer(Modifier.height(6.dp))
+            Text("PDF: $path")
         }
 
         err?.let {
