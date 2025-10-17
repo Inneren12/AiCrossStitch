@@ -2,24 +2,27 @@ package com.appforcross.editor.io
 
 import android.content.ContentResolver
 import android.content.Context
-import android.graphics.*
+import android.content.res.AssetFileDescriptor
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ColorSpace
+import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
 import androidx.exifinterface.media.ExifInterface
 import com.appforcross.editor.logging.Logger
-import android.content.res.AssetFileDescriptor
-import java.io.InputStream
 import java.util.concurrent.Callable
+
 data class DecodedImage(
-        val bitmap: Bitmap,                 // как прочитали (ARGB_8888 или RGBA_F16)
-        val colorSpace: ColorSpace?,        // исходное пространство
-        val iccConfidence: Boolean,         // true если ColorSpace определён надёжно
-        val rotated: Boolean,               // применён поворот по EXIF
-        val width: Int,
-        val height: Int,
-        val mime: String?,
-        val exclusive: Boolean
-    )
+    val bitmap: Bitmap,                 // как прочитали (ARGB_8888 или RGBA_F16)
+    val colorSpace: ColorSpace?,        // исходное пространство
+    val iccConfidence: Boolean,         // true если ColorSpace определён надёжно
+    val rotated: Boolean,               // применён поворот по EXIF
+    val width: Int,
+    val height: Int,
+    val mime: String?,
+    val exclusive: Boolean
+)
 
 object Decoder {
 
@@ -41,32 +44,32 @@ object Decoder {
                     if (afd == null) ExifInterface.ORIENTATION_UNDEFINED else readExifOrientation(afd)
             }
             // ...а Source создаём через Callable<AFD>, чтобы декодер сам управлял ресурсом.
-            val source = ImageDecoder.createSource(java.util.concurrent.Callable {
+            val source = ImageDecoder.createSource(Callable {
                 resolver.openAssetFileDescriptor(uri, "r")
                     ?: throw IllegalArgumentException("openAssetFileDescriptor returned null")
             })
             var outCs: ColorSpace? = null
             srcBmp = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-        // Если HDR/широкий гамут, просим F16, иначе достаточно 8888
-                    val cs = info.colorSpace
-                    outCs = cs
-                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                    decoder.isMutableRequired = true
-                    decoder.setTargetColorSpace(cs ?: ColorSpace.get(ColorSpace.Named.SRGB))
-                    decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_LOW_RAM
-                    // Ограничаем размер декода для очень больших исходников (~16 Мп)
-                    val w0 = info.size.width
-                    val h0 = info.size.height
-                    val mp = 1L * w0 * h0
-                    if (mp > MAX_DEC_MP) {
-                        val scale = kotlin.math.sqrt(MAX_DEC_MP.toDouble() / mp.toDouble())
-                        val tw = kotlin.math.max(1, (w0 * scale).toInt())
-                        val th = kotlin.math.max(1, (h0 * scale).toInt())
-                        decoder.setTargetSize(tw, th)
-                    }
-                    if (cs?.isWideGamut == true || cs == ColorSpace.get(ColorSpace.Named.BT2020_HLG) || cs == ColorSpace.get(ColorSpace.Named.BT2020_PQ)) {
-                        decoder.setTargetColorSpace(cs)
-                    }
+                // Если HDR/широкий гамут, просим F16, иначе достаточно 8888
+                val cs = info.colorSpace
+                outCs = cs
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                decoder.isMutableRequired = true
+                decoder.setTargetColorSpace(cs ?: ColorSpace.get(ColorSpace.Named.SRGB))
+                decoder.memorySizePolicy = ImageDecoder.MEMORY_POLICY_LOW_RAM
+                // Ограничаем размер декода для очень больших исходников (~16 Мп)
+                val w0 = info.size.width
+                val h0 = info.size.height
+                val mp = 1L * w0 * h0
+                if (mp > MAX_DEC_MP) {
+                    val scale = kotlin.math.sqrt(MAX_DEC_MP.toDouble() / mp.toDouble())
+                    val tw = kotlin.math.max(1, (w0 * scale).toInt())
+                    val th = kotlin.math.max(1, (h0 * scale).toInt())
+                    decoder.setTargetSize(tw, th)
+                }
+                if (cs?.isWideGamut == true || cs == ColorSpace.get(ColorSpace.Named.BT2020_HLG) || cs == ColorSpace.get(ColorSpace.Named.BT2020_PQ)) {
+                    decoder.setTargetColorSpace(cs)
+                }
             }
             srcCs = outCs
             // Новый буфер из ImageDecoder (SOFTWARE) обычно мутируем и эксклюзивен:
@@ -145,7 +148,7 @@ object Decoder {
 
     /** Поворот по EXIF (уже известна ориентация). Возвращает (bitmap, rotated). */
     private fun applyExifRotate(orientation: Int, bmp: Bitmap): Pair<Bitmap, Boolean> {
-        val m = Matrix()
+        val m = android.graphics.Matrix()
         when (orientation) {
             ExifInterface.ORIENTATION_ROTATE_90  -> m.setRotate(90f)
             ExifInterface.ORIENTATION_ROTATE_180 -> m.setRotate(180f)
@@ -162,25 +165,25 @@ object Decoder {
         }
         var out = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
         // Гарантия mutable-буфера (некоторые прошивки возвращают immutable)
-        val needsMutableFix = !out.isMutable || (android.os.Build.VERSION.SDK_INT >= 26 && out.config == Bitmap.Config.HARDWARE)
+        val needsMutableFix = !out.isMutable || (Build.VERSION.SDK_INT >= 26 && out.config == Bitmap.Config.HARDWARE)
         if (needsMutableFix) {
             // Сохраняем глубину: для F16 → RGBA_F16, иначе ARGB_8888
-            val cfg = if (android.os.Build.VERSION.SDK_INT >= 26 && (out.config == Bitmap.Config.RGBA_F16 || bmp.config == Bitmap.Config.RGBA_F16))
+            val cfg = if (Build.VERSION.SDK_INT >= 26 && (out.config == Bitmap.Config.RGBA_F16 || bmp.config == Bitmap.Config.RGBA_F16))
                 Bitmap.Config.RGBA_F16 else Bitmap.Config.ARGB_8888
             val copy = out.copy(cfg, /*mutable*/ true)
             // Перенесём ColorSpace, если доступен
-            if (android.os.Build.VERSION.SDK_INT >= 26) {
+            if (Build.VERSION.SDK_INT >= 26) {
                 val cs = out.colorSpace ?: bmp.colorSpace
                 if (cs != null) copy.setColorSpace(cs)
             }
-            com.appforcross.editor.logging.Logger.w(
+            Logger.w(
                 "IO", "rotate.result.immutable",
                 mapOf("cfg" to (out.config?.toString() ?: "null"), "fixedTo" to cfg.toString())
             )
             out = copy
         }
         return Pair(out, true)
-         }
+    }
 
     /** Однократное чтение EXIF‑ориентации (до декодирования). */
     /** EXIF-ориентация из AFD с учётом startOffset: используем поток окна ресурса. */
@@ -192,19 +195,21 @@ object Decoder {
             )
         }
     } catch (_: Exception) {
-            ExifInterface.ORIENTATION_UNDEFINED
-        }
+        ExifInterface.ORIENTATION_UNDEFINED
+    }
+
     /** Вариант через ContentResolver/Uri: также читаем через AFD.createInputStream(). */
-     private fun readExifOrientation(res: ContentResolver, uri: Uri): Int = try {
+    private fun readExifOrientation(res: ContentResolver, uri: Uri): Int = try {
         res.openAssetFileDescriptor(uri, "r").use { afd ->
             if (afd == null) {
                 ExifInterface.ORIENTATION_UNDEFINED
             } else {
-                    afd.createInputStream().use { ins ->
+                afd.createInputStream().use { ins ->
                     ExifInterface(ins).getAttributeInt(
                         ExifInterface.TAG_ORIENTATION,
-                        ExifInterface.ORIENTATION_NORMAL) }
-                    }
+                        ExifInterface.ORIENTATION_NORMAL)
+                }
+            }
         }
     } catch (_: Exception) {
         ExifInterface.ORIENTATION_UNDEFINED

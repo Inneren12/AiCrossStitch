@@ -54,5 +54,4 @@ object HalfBufferPool {
     fun release() {
         local.set(ShortArray(0))
     }
-
 }

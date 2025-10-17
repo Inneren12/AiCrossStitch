@@ -2,13 +2,10 @@ package com.appforcross.editor.filters
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
-import android.graphics.Color
-import com.appforcross.editor.logging.Logger
-import kotlin.math.abs
 import android.util.Half
+import com.appforcross.editor.util.HalfBufferPool
 import java.nio.ShortBuffer
 import kotlin.math.abs
-import com.appforcross.editor.util.HalfBufferPool
 
 /** Оценка блокинга JPEG и лёгкий deblocking до остальных шагов. */
 object Deblocking8x8 {

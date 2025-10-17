@@ -2,11 +2,14 @@ package com.appforcross.editor.filters
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
-import com.appforcross.editor.logging.Logger
-import kotlin.math.*
 import android.util.Half
-import java.nio.ShortBuffer
+import com.appforcross.editor.logging.Logger
 import com.appforcross.editor.util.HalfBufferPool
+import java.nio.ShortBuffer
+import kotlin.math.abs
+import kotlin.math.exp
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 /** Подавление светлых ореолов (смартфонный шарп): DoG вдоль кромок + мягкий clamp. */
 object HaloRemoval {

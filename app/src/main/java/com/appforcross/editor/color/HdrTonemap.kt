@@ -2,12 +2,15 @@ package com.appforcross.editor.color
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
-import android.util.Half
-import java.nio.ShortBuffer
 import android.graphics.ColorSpace
+import android.util.Half
 import com.appforcross.editor.logging.Logger
-import kotlin.math.*
 import com.appforcross.editor.util.HalfBufferPool
+import java.nio.ShortBuffer
+import kotlin.math.exp
+import kotlin.math.ln
+import kotlin.math.max
+import kotlin.math.pow
 
 /** Простейший EOTF для BT.2100 **PQ** и **HLG** → линейный (норм. до [0..1]). */
 object HdrTonemap {
@@ -44,27 +47,34 @@ object HdrTonemap {
             var i = 0
             while (i < total) {
                 // R,G,B,A — в half
-                var r = Half.toFloat(half[i])
-                var g = Half.toFloat(half[i + 1])
-                var b = Half.toFloat(half[i + 2])
+                val storedR = Half.toFloat(half[i])
+                val storedG = Half.toFloat(half[i + 1])
+                val storedB = Half.toFloat(half[i + 2])
                 val a = Half.toFloat(half[i + 3]).coerceIn(0f, 1f)
+                val alphaSafe = if (isPremul && a > 1e-6f) a else 1f
+                var r = if (isPremul && a > 1e-6f) storedR / alphaSafe else storedR
+                var g = if (isPremul && a > 1e-6f) storedG / alphaSafe else storedG
+                var b = if (isPremul && a > 1e-6f) storedB / alphaSafe else storedB
                 // Не повторяем EOTF, если пиксели уже LINEAR после ColorSpace.connect
                 if (!alreadyLinearFromConnector) {
                     if (isPQ) { r = pqToLinear(r, pqNormNits); g = pqToLinear(g, pqNormNits); b = pqToLinear(b, pqNormNits) }
                     else      { r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b) }
                 }
-                 // Телеметрия по "запасу над 1.0": если кадр премультиплирован — считаем по депремультиплированным RGB.
+                // Телеметрия по "запасу над 1.0": если кадр премультиплирован — считаем по депремультиплированным RGB.
                 val rgbMax = max(r, max(g, b))
-                val metricRgb = if (isPremul && a > 1e-6f) rgbMax / a else rgbMax
-                headroomMax = max(headroomMax, metricRgb - 1f)
+                headroomMax = max(headroomMax, rgbMax - 1f)
                 // Мягкое плечо и клип снизу
                 r = max(0f, softKneeAbove1(r, headroom))
                 g = max(0f, softKneeAbove1(g, headroom))
                 b = max(0f, softKneeAbove1(b, headroom))
+                // Возврат в премультиплированное пространство при необходимости
+                val outR = if (isPremul) r * a else r
+                val outG = if (isPremul) g * a else g
+                val outB = if (isPremul) b * a else b
                 // Запись обратно в half
-                half[i    ] = Half.toHalf(r)
-                half[i + 1] = Half.toHalf(g)
-                half[i + 2] = Half.toHalf(b)
+                half[i    ] = Half.toHalf(outR)
+                half[i + 1] = Half.toHalf(outG)
+                half[i + 2] = Half.toHalf(outB)
                 half[i + 3] = Half.toHalf(a)
                 i += 4
             }
@@ -78,7 +88,7 @@ object HdrTonemap {
                 mapOf("space" to srcColorSpace.name, "headroomMax" to headroomMax,
                     "premul" to isPremul, "headroom" to headroom,
                     "alreadyLinear" to alreadyLinearFromConnector, "pqNormNits" to pqNormNits))
-             return true
+            return true
         } finally {
             // Гарантированно усечём пул даже при исключениях
             HalfBufferPool.trimIfOversized()
