@@ -6,9 +6,12 @@ import com.appforcross.editor.diagnostics.DiagnosticsManager
 import com.appforcross.editor.logging.Logger
 import org.json.JSONObject
 import java.io.File
-import java.io.FileOutputStream
 import java.util.*
 import kotlin.math.*
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 object PatternRunner {
 
@@ -29,6 +32,107 @@ object PatternRunner {
         val smallIslandsPer1000: Double,
         val runMedian: Double
     )
+
+    // ========= CORE S9 FIX: robust quant→legend LUT + safe writer =========
+    private data class LegendEntryLite(val rgb: Int)
+
+    // --- LUT: строим соответствие quantPalette[i] → legendIndex ---
+    private fun buildQuantToLegendLut(quantPalette: IntArray, legend: List<LegendEntryLite>): IntArray {
+        val byRgb = HashMap<Int, Int>(legend.size).apply {
+            legend.forEachIndexed { li, e -> put(e.rgb, li) }
+        }
+        var exact = 0; var fallback = 0
+        val lut = IntArray(quantPalette.size) { 0 }
+        for (qi in quantPalette.indices) {
+            val rgb = quantPalette[qi]
+            val li = byRgb[rgb] ?: nearestLegend(rgb, legend).also { fallback++ }
+            if (byRgb.containsKey(rgb)) exact++
+            lut[qi] = li
+        }
+        Logger.i("PATTERN","lut.stats", mapOf("quantK" to quantPalette.size, "legendK" to legend.size, "exact" to exact, "fallback" to fallback))
+        return lut
+    }
+
+        private fun nearestLegend(rgb: Int, legend: List<LegendEntryLite>): Int {
+        var best = 0
+        var bestD = Int.MAX_VALUE
+        val r = (rgb ushr 16) and 0xFF
+        val g = (rgb ushr 8) and 0xFF
+        val b = rgb and 0xFF
+        legend.forEachIndexed { li, e ->
+            val er = (e.rgb ushr 16) and 0xFF
+            val eg = (e.rgb ushr 8) and 0xFF
+            val eb = e.rgb and 0xFF
+            val dr = r - er; val dg = g - eg; val db = b - eb
+            val d = dr*dr + dg*dg + db*db
+            if (d < bestD) { bestD = d; best = li }
+        }
+        return best
+    }
+
+    // --- читаем квант-индексы как IntArray (px элементов, elemSize=1/2/4 подхватываем авто) ---
+    private fun readQuantIndex(quantIndexPath: String, px: Int): IntArray {
+        val f = File(quantIndexPath)
+        val elem = when (f.length().toInt()) {
+            px -> 1
+            px * 2 -> 2
+            px * 4 -> 4
+            else -> 1
+        }
+        val out = IntArray(px)
+        FileInputStream(f).use { ins ->
+            val buf = ByteArray(px * elem)
+            var off = 0
+            while (off < buf.size) {
+                val n = ins.read(buf, off, buf.size - off)
+                if (n <= 0) break
+                off += n
+            }
+            val bb = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN)
+            when (elem) {
+                1 -> for (i in 0 until px) out[i] = bb.get().toInt() and 0xFF
+                2 -> for (i in 0 until px) out[i] = bb.short.toInt() and 0xFFFF
+                else -> for (i in 0 until px) out[i] = bb.int
+            }
+        }
+        return out
+    }
+
+    // --- пишем pattern_index.bin как 1 байт/пикс. + логи min/max/unique ---
+    private fun writePatternIndex(dstPath: String, indices: IntArray) {
+        val bytes = ByteArray(indices.size)
+        for (i in indices.indices) bytes[i] = indices[i].toByte()
+        FileOutputStream(File(dstPath)).use { it.write(bytes) }
+        var min = Int.MAX_VALUE; var max = Int.MIN_VALUE
+        val seen = HashSet<Int>()
+        indices.forEach { v ->
+            if (v < min) min = v
+            if (v > max) max = v
+            seen += v
+        }
+        Logger.i("PATTERN","write.stats", mapOf("px" to indices.size, "min" to min, "max" to max, "unique" to seen.size))
+    }
+
+    // ВСТАВЬ это место в твоём run()/build() ровно там, где раньше формировался pattern_index.bin
+    // Ниже — пример вызова (псевдоконтекст, подстрой под свои переменные):
+    private fun buildAndWritePatternIndex(
+        quantIndexPath: String,          // …/cache/index.bin (S7)
+        quantPalette: IntArray,          // qOut.palette (S7)
+        legendRgb: IntArray,             // rgb из pattern_legend.json (S9)
+        width: Int, height: Int,         // размеры исхода (или quant_color.png)
+        outPatternIndexPath: String      // …/cache/pattern_index.bin (S9)
+    ) {
+        val legendLite = legendRgb.map { LegendEntryLite(it) }
+        val lut = buildQuantToLegendLut(quantPalette, legendLite)
+        val px = width * height
+        val qIdx = readQuantIndex(quantIndexPath, px)
+        val out = IntArray(px)
+        for (i in 0 until px) {
+            val qi = qIdx[i]
+            out[i] = if (qi in lut.indices) lut[qi] else 0
+        }
+        writePatternIndex(outPatternIndexPath, out)
+    }
 
     /** Главный метод: берём индексную карту + палитру, чистим топологию, назначаем символы и отрисовываем превью. */
     fun run(
