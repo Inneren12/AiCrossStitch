@@ -121,17 +121,29 @@ object CatalogMapper {
     private fun cbrtF(x: Float) = if (x <= 0f) 0f else Math.cbrt(x.toDouble()).toFloat()
 
     private fun topN(cat: ThreadCatalog, target: Triple<Float,Float,Float>, n:Int): List<ThreadColor> {
+        if (n <= 0) return emptyList()
         val (L,A,B) = target
         val items = cat.items
-        val scored = ArrayList<Pair<ThreadColor, Double>>(items.size)
+        val limit = min(n, items.size)
+        if (limit == 0) return emptyList()
+        val bestColors = ArrayList<ThreadColor>(limit)
+        val bestScores = ArrayList<Double>(limit)
         for (t in items) {
             val d = de2(L,A,B, t.okL,t.okA,t.okB)
-            scored.add(Pair(t, d))
+            if (bestColors.size < limit) {
+                var pos = bestScores.size
+                while (pos > 0 && d < bestScores[pos - 1]) pos--
+                bestScores.add(pos, d)
+                bestColors.add(pos, t)
+            } else if (d < bestScores.last()) {
+                var pos = bestScores.size - 1
+                while (pos > 0 && d < bestScores[pos - 1]) pos--
+                bestScores.add(pos, d)
+                bestColors.add(pos, t)
+                bestScores.removeAt(bestScores.lastIndex)
+                bestColors.removeAt(bestColors.lastIndex)
+            }
         }
-        scored.sortBy { pair -> pair.second }
-        val limit = min(n, scored.size)
-        val result = ArrayList<ThreadColor>(limit)
-        for (i in 0 until limit) result.add(scored[i].first)
-        return result
+        return bestColors
     }
 }
