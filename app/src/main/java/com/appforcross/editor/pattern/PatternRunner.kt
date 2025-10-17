@@ -40,6 +40,7 @@ object PatternRunner {
         opt: Options = Options()
     ): Output {
         Logger.i("PATTERN", "start", mapOf("k" to palette.size, "index" to indexBinPath, "color" to colorPngPath))
+        require(palette.isNotEmpty()) { "Palette is empty; cannot build pattern" }
         // 0) читаем размеры из цветного PNG и индексы из bin
         val bmp = BitmapFactory.decodeFile(colorPngPath)
         require(bmp != null) { "Cannot decode color PNG: $colorPngPath" }
@@ -131,7 +132,17 @@ object PatternRunner {
             mags.add(abs(gx) + abs(gy))
         }
         mags.sort()
-        val thr = mags[ (mags.size * 0.85).toInt().coerceIn(0, mags.lastIndex) ]
+        val thr = if (mags.isEmpty()) {
+            Int.MAX_VALUE
+        } else {
+            val pos = (mags.size * 0.85).toInt().coerceIn(0, mags.lastIndex)
+            val candidate = mags[pos]
+            if (candidate == 0) {
+                mags.firstOrNull { it > 0 } ?: Int.MAX_VALUE
+            } else {
+                candidate
+            }
+        }
         for (y in 1 until h - 1) for (x in 1 until w - 1) {
             val gx = L[y * w + x] - L[y * w + (x - 1)]
             val gy = L[y * w + x] - L[(y - 1) * w + x]
@@ -348,7 +359,7 @@ object PatternRunner {
             val o = JSONObject()
             o.put("idx", i)
             o.put("rgb", rgbHex(palette[i]))
-            o.put("symbol", symbols[i].toString())
+            o.put("symbol", symbols[i])
             cat[i]?.let { m -> // может быть Single или Blend
                 o.put("brand", m.brand)
                 o.put("type", m.type)
@@ -428,14 +439,14 @@ object PatternRunner {
         text.textAlign = Paint.Align.CENTER
         text.typeface = Typeface.MONOSPACE
         text.textSize = (scale * 0.8f).coerceAtLeast(8f)
-        val syms = CharArray(palette.size) { ' ' }
+        val syms = Array(palette.size) { "" }
         run {
             val arr = legend.getJSONArray("entries")
             for (i in 0 until arr.length()) {
                 val e = arr.getJSONObject(i)
                 val idxi = e.getInt("idx")
                 val s = e.getString("symbol")
-                syms[idxi] = s.firstOrNull() ?: '•'
+                syms[idxi] = s.ifEmpty { "•" }
             }
         }
         // клетки
@@ -460,7 +471,8 @@ object PatternRunner {
                 // символ
                 val cx = xx + scale / 2f
                 val cy = yy + scale / 2f - (text.fontMetrics.ascent + text.fontMetrics.descent) / 2f
-                canvas.drawText(syms[ci].toString(), cx, cy, text)
+                val symbol = syms[ci].ifEmpty { "•" }
+                canvas.drawText(symbol, cx, cy, text)
             }
         }
         if (drawGrid && scale >= 6) {
