@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import com.appforcross.editor.analysis.AnalyzeResult
+import com.appforcross.editor.color.ColorMgmt
 import com.appforcross.editor.diagnostics.DiagnosticsManager
 import com.appforcross.editor.io.ImagePrep
 import com.appforcross.editor.logging.Logger
@@ -11,7 +12,6 @@ import com.appforcross.editor.preset.PresetGateResult
 import com.appforcross.editor.preset.PresetSpec
 import java.io.File
 import java.io.FileOutputStream
-import android.graphics.ColorSpace
 
 object PreScaleRunner {
     data class Output(
@@ -56,8 +56,12 @@ object PreScaleRunner {
         )
         // Сохраняем
         val out = File(ctx.cacheDir, "prescale_${res.wst}x${res.hst}.png")
+        val pngBitmap = ColorMgmt.linearSrgbF16ToSrgb8888(res.out)
         FileOutputStream(out).use { fos ->
-            res.out.compress(Bitmap.CompressFormat.PNG, 100, fos)
+            pngBitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+        }
+        if (pngBitmap !== res.out) {
+            pngBitmap.recycle()
         }
         // Диагностика (скопируем в сессию)
         try {
