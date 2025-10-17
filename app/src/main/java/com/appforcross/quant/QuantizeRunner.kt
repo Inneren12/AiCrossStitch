@@ -32,6 +32,7 @@ object QuantizeRunner {
         val indexBin: String,
         val paletteJson: String,
         val k: Int,
+        val palette: IntArray,
         val deMin: Double,
         val deMed: Double,
         val avgErr: Double
@@ -76,8 +77,8 @@ object QuantizeRunner {
             val ampSkyFlat = opt.orderedAmpSkyFlat
             val ampSkin = opt.orderedAmpSkin
             // применим малую амплитуду на всем изображении, а потом смешаем по маскам
-            val odAll = Dither.ordered(working, ampSkyFlat)
-            val odSkin = if (ampSkin == ampSkyFlat) odAll else Dither.ordered(working, ampSkin)
+            val odAll = com.appforcross.editor.quant.Dither.ordered(working, ampSkyFlat)
+            val odSkin = if (ampSkin == ampSkyFlat) odAll else com.appforcross.editor.quant.Dither.ordered(working, ampSkin)
             working = mixByMasks(working, odAll, masks.sky, 1f)
             working = mixByMasks(working, odAll, masks.flat, 0.7f)
             working = mixByMasks(working, odSkin, masks.skin, 1f)
@@ -183,6 +184,7 @@ object QuantizeRunner {
             indexBin = indexBin.absolutePath,
             paletteJson = palJson.absolutePath,
             k = qres.metrics.k,
+            palette = pal,
             deMin = qres.metrics.deMin,
             deMed = qres.metrics.deMed,
             avgErr = qres.metrics.avgErr
