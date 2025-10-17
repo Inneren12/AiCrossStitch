@@ -52,7 +52,7 @@ object ColorMgmt {
             // Полностью плавающая обработка: читаем float-компоненты и пишем half‑float без 8‑бит квантизации.
             // Конвертация блоком, без getColor на пиксель
             val dst = ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
-            // ⬇️ src должен быть non-null: используем effectiveCs вместо nullable srcCs
+            // src должен быть non-null: используем effectiveCs вместо nullable srcCs
             val connector = ColorSpace.connect(effectiveCs, dst)
                 val total = w * h * 4
             val half = HalfBufferPool.obtain(total)
