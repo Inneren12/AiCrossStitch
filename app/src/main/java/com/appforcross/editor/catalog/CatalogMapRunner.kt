@@ -6,6 +6,7 @@ import com.appforcross.editor.diagnostics.DiagnosticsManager
 import com.appforcross.editor.logging.Logger
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 
 object CatalogMapRunner {
     data class Output(
@@ -32,8 +33,8 @@ object CatalogMapRunner {
             val sb = StringBuilder(4096)
             sb.append("{\"brand\":").append(jsonString(brand)).append(',')
             sb.append("\"metrics\":{")
-                .append("\"avgDE\":").append("%.3f".format(res.metrics.avgDE)).append(',')
-                .append("\"maxDE\":").append("%.3f".format(res.metrics.maxDE)).append(',')
+                .append("\"avgDE\":").append(formatDecimal(res.metrics.avgDE)).append(',')
+                .append("\"maxDE\":").append(formatDecimal(res.metrics.maxDE)).append(',')
                 .append("\"blends\":").append(res.metrics.blendsCount)
                 .append("},\"entries\":[")
             res.entries.forEachIndexed { i, e ->
@@ -45,7 +46,7 @@ object CatalogMapRunner {
                         sb.append(",\"type\":\"single\",\"code\":").append(jsonString(m.color.code)).append(',')
                             .append("\"name\":").append(jsonString(m.color.name)).append(',')
                             .append("\"rgb\":").append(jsonString(rgbHex(m.color.rgb))).append(',')
-                            .append("\"dE\":").append("%.3f".format(m.dE))
+                            .append("\"dE\":").append(formatDecimal(m.dE))
                     }
                     is CatalogMatch.Blend -> {
                         sb.append(",\"type\":\"blend\",\"codeA\":").append(jsonString(m.a.code)).append(',')
@@ -54,7 +55,7 @@ object CatalogMapRunner {
                             .append("\"nameB\":").append(jsonString(m.b.name)).append(',')
                             .append("\"rgbA\":").append(jsonString(rgbHex(m.a.rgb))).append(',')
                             .append("\"rgbB\":").append(jsonString(rgbHex(m.b.rgb))).append(',')
-                            .append("\"dE\":").append("%.3f".format(m.dE))
+                            .append("\"dE\":").append(formatDecimal(m.dE))
                     }
                 }
                 sb.append('}')
@@ -69,8 +70,8 @@ object CatalogMapRunner {
             }
         } catch (_: Exception) {}
         Logger.i("CATMAP", "done", mapOf(
-            "avgDE" to "%.3f".format(res.metrics.avgDE),
-            "maxDE" to "%.3f".format(res.metrics.maxDE),
+            "avgDE" to formatDecimal(res.metrics.avgDE),
+            "maxDE" to formatDecimal(res.metrics.maxDE),
             "blends" to res.metrics.blendsCount,
             "json" to out.absolutePath
         ))
@@ -82,6 +83,9 @@ object CatalogMapRunner {
 
     private fun jsonString(s: String?): String =
         if (s == null) "null" else "\"" + escapeJsonString(s) + "\""
+
+    private fun formatDecimal(value: Double): String =
+        String.format(Locale.US, "%.3f", value)
 
     private fun escapeJsonString(value: String): String {
         val sb = StringBuilder(value.length + 8)

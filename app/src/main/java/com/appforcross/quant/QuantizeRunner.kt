@@ -216,7 +216,7 @@ object QuantizeRunner {
             val scaled = if (src.width == w && src.height == h) {
                 src
             } else {
-                Bitmap.createScaledBitmap(src, w, h, true)
+                Bitmap.createScaledBitmap(src, w, h, /* filter = */ false)
             }
             val shouldRecycle = scaled !== src
             if (scaled.config == Bitmap.Config.ALPHA_8 && scaled.isMutable && shouldRecycle) return scaled
