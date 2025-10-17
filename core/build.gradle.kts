@@ -22,15 +22,9 @@ android {
     }
 }
 
-kotlin {
-    jvmToolchain(17)
-}
-
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-}
+kotlin { jvmToolchain(17) }
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach { kotlinOptions.jvmTarget = "17" }
+ 
 
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.04.01"))
