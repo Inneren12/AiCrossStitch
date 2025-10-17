@@ -10,6 +10,7 @@ import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlin.math.max
 
 /** Подавление светлых ореолов (смартфонный шарп): DoG вдоль кромок + мягкий clamp. */
 object HaloRemoval {
