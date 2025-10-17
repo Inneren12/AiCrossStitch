@@ -67,8 +67,12 @@ object ImagePrep {
         if (dec.bitmap !== linear && dec.exclusive && recycleDecoded) {
             try { dec.bitmap.recycle() } catch (_: Throwable) {}
         }
-        // 3) HDR тонмап при необходимости (PQ/HLG)
-        val wasHdr = HdrTonemap.applyIfNeeded(linear, dec.colorSpace /*, headroom = 3f */)
+        // 3) HDR тонмап при необходимости (PQ/HLG) — EOTF уже выполнен в ColorMgmt.
+        val wasHdr = HdrTonemap.applyIfNeeded(
+            linear, dec.colorSpace,
+            headroom = HdrTonemap.defaultHeadroom,
+            alreadyLinearFromConnector = true
+        )
         // 4) Blockiness + deblock
         val blk = Deblocking8x8.measureBlockinessLinear(linear)
         // Ранний skip: силы ~0 — не тратим проход по изображению

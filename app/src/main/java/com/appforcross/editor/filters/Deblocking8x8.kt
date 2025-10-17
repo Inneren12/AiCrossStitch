@@ -1,9 +1,14 @@
 package com.appforcross.editor.filters
 
+import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.graphics.Color
 import com.appforcross.editor.logging.Logger
 import kotlin.math.abs
+import android.util.Half
+import java.nio.ShortBuffer
+import kotlin.math.abs
+import com.appforcross.editor.util.HalfBufferPool
 
 /** Оценка блокинга JPEG и лёгкий deblocking до остальных шагов. */
 object Deblocking8x8 {
@@ -11,46 +16,43 @@ object Deblocking8x8 {
     data class Blockiness(val vertical: Float, val horizontal: Float, val mean: Float)
 
     /** Простейшая метрика блокинга по границам 8x8 по люме (linear RGB). */
+    @SuppressLint("HalfFloat")
     fun measureBlockinessLinear(bitmap: Bitmap): Blockiness {
         val w = bitmap.width
         val h = bitmap.height
-        var vSum = 0.0
-        var vCnt = 0
-        var hSum = 0.0
-        var hCnt = 0
-        val row = IntArray(w)
-        // вертикальные границы (x = 8,16,...) — читаем КАЖДУЮ строку ОДИН раз
+        val total = w * h * 4
+        val half = HalfBufferPool.obtain(total)
+        val sb = ShortBuffer.wrap(half, 0, total)
+        bitmap.copyPixelsToBuffer(sb)
+        var vSum = 0.0; var vCnt = 0
+        var hSum = 0.0; var hCnt = 0
+        // Вертикальные границы x=8,16,...
         for (y in 0 until h) {
-            bitmap.getPixels(row, 0, w, 0, y, w, 1)
             var x = 8
             while (x < w) {
-                val c1 = Color.valueOf(row[x])
-                val c0 = Color.valueOf(row[x - 1])
-                val l1 = 0.2126f * c1.red() + 0.7152f * c1.green() + 0.0722f * c1.blue()
-                val l0 = 0.2126f * c0.red() + 0.7152f * c0.green() + 0.0722f * c0.blue()
-                vSum += abs(l1 - l0).toDouble()
-                vCnt++
-                x += 8
+                val iR = ((y * w + (x - 1)) * 4)
+                val iL = ((y * w + x) * 4)
+                val l0 = 0.2126f*Half.toFloat(half[iR    ]) + 0.7152f*Half.toFloat(half[iR+1]) + 0.0722f*Half.toFloat(half[iR+2])
+                val l1 = 0.2126f*Half.toFloat(half[iL    ]) + 0.7152f*Half.toFloat(half[iL+1]) + 0.0722f*Half.toFloat(half[iL+2])
+                vSum += abs((l1 - l0).toDouble()); vCnt++; x += 8
             }
         }
-        // горизонтальные границы (y = 8,16,...)
+        // Горизонтальные границы y=8,16,...
         var yb = 8
-        // Reuse: один раз создаём буферы строк и переиспользуем.
-        val cur = IntArray(w)
-        val prev = IntArray(w)
         while (yb < h) {
-            bitmap.getPixels(cur, 0, w, 0, yb, w, 1)
-            bitmap.getPixels(prev, 0, w, 0, yb - 1, w, 1)
-            for (i in 0 until w) {
-                val c1 = Color.valueOf(cur[i])
-                val c0 = Color.valueOf(prev[i])
-                val l1 = 0.2126f * c1.red() + 0.7152f * c1.green() + 0.0722f * c1.blue()
-                val l0 = 0.2126f * c0.red() + 0.7152f * c0.green() + 0.0722f * c0.blue()
-                hSum += abs(l1 - l0).toDouble()
-                hCnt++
+            val rowT = (yb - 1) * w
+            val rowB = yb * w
+            var x = 0
+            while (x < w) {
+                val iT = ((rowT + x) * 4)
+                val iB = ((rowB + x) * 4)
+                val l0 = 0.2126f*Half.toFloat(half[iT    ]) + 0.7152f*Half.toFloat(half[iT+1]) + 0.0722f*Half.toFloat(half[iT+2])
+                val l1 = 0.2126f*Half.toFloat(half[iB    ]) + 0.7152f*Half.toFloat(half[iB+1]) + 0.0722f*Half.toFloat(half[iB+2])
+                hSum += abs((l1 - l0).toDouble()); hCnt++; x++
             }
             yb += 8
         }
+        HalfBufferPool.trimIfOversized()
         val v = if (vCnt > 0) (vSum / vCnt).toFloat() else 0f
         val hmean = if (hCnt > 0) (hSum / hCnt).toFloat() else 0f
         return Blockiness(v, hmean, (v + hmean) * 0.5f)
@@ -60,53 +62,61 @@ object Deblocking8x8 {
     fun weakDeblockInPlaceLinear(bitmap: Bitmap, strength: Float = 0.5f) {
         val w = bitmap.width
         val h = bitmap.height
-        // Вертикальные границы: по ОДНОМУ setPixels на строку
-        val row = IntArray(w)
+        val total = w * h * 4
+        val half = HalfBufferPool.obtain(total)
+        val sb = ShortBuffer.wrap(half, 0, total)
+        bitmap.copyPixelsToBuffer(sb)
+        sb.rewind()
+        // Вертикальные границы
         for (y in 0 until h) {
-            bitmap.getPixels(row, 0, w, 0, y, w, 1)
             var x = 8
             while (x < w) {
-                val cL = Color.valueOf(row[x - 1])
-                val cR = Color.valueOf(row[x])
-                val r = (cL.red() + cR.red()) * 0.5f
-                val g = (cL.green() + cR.green()) * 0.5f
-                val b = (cL.blue() + cR.blue()) * 0.5f
-                val a = (cL.alpha() + cR.alpha()) * 0.5f
-                row[x - 1] = lerpColor(cL, r, g, b, a, strength)
-                row[x]     = lerpColor(cR, r, g, b, a, strength)
+                val iL = ((y * w + (x - 1)) * 4)
+                val iR = ((y * w + x) * 4)
+                val rAvg = (Half.toFloat(half[iL    ]) + Half.toFloat(half[iR    ])) * 0.5f
+                val gAvg = (Half.toFloat(half[iL + 1]) + Half.toFloat(half[iR + 1])) * 0.5f
+                val bAvg = (Half.toFloat(half[iL + 2]) + Half.toFloat(half[iR + 2])) * 0.5f
+                val aAvg = (Half.toFloat(half[iL + 3]) + Half.toFloat(half[iR + 3])) * 0.5f
+                fun mix(ch: Float, avg: Float) = (ch + (avg - ch) * strength).coerceIn(0f, 1f)
+                half[iL    ] = Half.toHalf(mix(Half.toFloat(half[iL    ]), rAvg))
+                half[iL + 1] = Half.toHalf(mix(Half.toFloat(half[iL + 1]), gAvg))
+                half[iL + 2] = Half.toHalf(mix(Half.toFloat(half[iL + 2]), bAvg))
+                half[iL + 3] = Half.toHalf(mix(Half.toFloat(half[iL + 3]), aAvg))
+                half[iR    ] = Half.toHalf(mix(Half.toFloat(half[iR    ]), rAvg))
+                half[iR + 1] = Half.toHalf(mix(Half.toFloat(half[iR + 1]), gAvg))
+                half[iR + 2] = Half.toHalf(mix(Half.toFloat(half[iR + 2]), bAvg))
+                half[iR + 3] = Half.toHalf(mix(Half.toFloat(half[iR + 3]), aAvg))
                 x += 8
             }
-            bitmap.setPixels(row, 0, w, 0, y, w, 1)
         }
-        // горизонты
+        // Горизонтальные границы
         var yb = 8
-        // Reuse: два буфера строк на всё выполнение вместо аллокации на каждую границу.
-        val rowA = IntArray(w)
-        val rowB = IntArray(w)
         while (yb < h) {
-            bitmap.getPixels(rowA, 0, w, 0, yb - 1, w, 1)
-            bitmap.getPixels(rowB, 0, w, 0, yb, w, 1)
-            for (i in 0 until w) {
-                val cA = Color.valueOf(rowA[i])
-                val cB = Color.valueOf(rowB[i])
-                val r = (cA.red() + cB.red()) * 0.5f
-                val g = (cA.green() + cB.green()) * 0.5f
-                val b = (cA.blue() + cB.blue()) * 0.5f
-                val a = (cA.alpha() + cB.alpha()) * 0.5f
-                rowA[i] = lerpColor(cA, r, g, b, a, strength)
-                rowB[i] = lerpColor(cB, r, g, b, a, strength)
+            val rowT = (yb - 1) * w
+            val rowB = yb * w
+            var x = 0
+            while (x < w) {
+                val iT = ((rowT + x) * 4)
+                val iB = ((rowB + x) * 4)
+                val rAvg = (Half.toFloat(half[iT    ]) + Half.toFloat(half[iB    ])) * 0.5f
+                val gAvg = (Half.toFloat(half[iT + 1]) + Half.toFloat(half[iB + 1])) * 0.5f
+                val bAvg = (Half.toFloat(half[iT + 2]) + Half.toFloat(half[iB + 2])) * 0.5f
+                val aAvg = (Half.toFloat(half[iT + 3]) + Half.toFloat(half[iB + 3])) * 0.5f
+                fun mix(ch: Float, avg: Float) = (ch + (avg - ch) * strength).coerceIn(0f, 1f)
+                half[iT    ] = Half.toHalf(mix(Half.toFloat(half[iT    ]), rAvg))
+                half[iT + 1] = Half.toHalf(mix(Half.toFloat(half[iT + 1]), gAvg))
+                half[iT + 2] = Half.toHalf(mix(Half.toFloat(half[iT + 2]), bAvg))
+                half[iT + 3] = Half.toHalf(mix(Half.toFloat(half[iT + 3]), aAvg))
+                half[iB    ] = Half.toHalf(mix(Half.toFloat(half[iB    ]), rAvg))
+                half[iB + 1] = Half.toHalf(mix(Half.toFloat(half[iB + 1]), gAvg))
+                half[iB + 2] = Half.toHalf(mix(Half.toFloat(half[iB + 2]), bAvg))
+                half[iB + 3] = Half.toHalf(mix(Half.toFloat(half[iB + 3]), aAvg))
+                x++
             }
-            bitmap.setPixels(rowA, 0, w, 0, yb - 1, w, 1)
-            bitmap.setPixels(rowB, 0, w, 0, yb, w, 1)
             yb += 8
         }
-    }
-
-    private fun lerpColor(c0: Color, r: Float, g: Float, b: Float, a: Float, t: Float): Int {
-        val nr = c0.red() + (r - c0.red()) * t
-        val ng = c0.green() + (g - c0.green()) * t
-        val nb = c0.blue() + (b - c0.blue()) * t
-        val na = c0.alpha() + (a - c0.alpha()) * t
-        return Color.valueOf(nr, ng, nb, na).toArgb()
+        sb.rewind()
+        bitmap.copyPixelsFromBuffer(sb)
+        HalfBufferPool.trimIfOversized()
     }
 }

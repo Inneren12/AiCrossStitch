@@ -19,7 +19,9 @@ object HdrTonemap {
     fun applyIfNeeded(
         linearSrgbF16: Bitmap,
         srcColorSpace: ColorSpace?,
-        headroom: Float = defaultHeadroom
+        headroom: Float = defaultHeadroom,
+        alreadyLinearFromConnector: Boolean = false,
+        pqNormNits: Float = 1000f
     ): Boolean {
         if (srcColorSpace == null) return false
         val isPQ = srcColorSpace == ColorSpace.get(ColorSpace.Named.BT2020_PQ)
@@ -46,10 +48,12 @@ object HdrTonemap {
                 var g = Half.toFloat(half[i + 1])
                 var b = Half.toFloat(half[i + 2])
                 val a = Half.toFloat(half[i + 3]).coerceIn(0f, 1f)
-                // EOTF
-                if (isPQ) { r = pqToLinear(r); g = pqToLinear(g); b = pqToLinear(b) }
-                else      { r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b) }
-                // Телеметрия по "запасу над 1.0": если кадр премультиплирован — считаем по депремультиплированным RGB.
+                // Не повторяем EOTF, если пиксели уже LINEAR после ColorSpace.connect
+                if (!alreadyLinearFromConnector) {
+                    if (isPQ) { r = pqToLinear(r, pqNormNits); g = pqToLinear(g, pqNormNits); b = pqToLinear(b, pqNormNits) }
+                    else      { r = hlgToLinear(r); g = hlgToLinear(g); b = hlgToLinear(b) }
+                }
+                 // Телеметрия по "запасу над 1.0": если кадр премультиплирован — считаем по депремультиплированным RGB.
                 val rgbMax = max(r, max(g, b))
                 val metricRgb = if (isPremul && a > 1e-6f) rgbMax / a else rgbMax
                 headroomMax = max(headroomMax, metricRgb - 1f)
@@ -71,8 +75,10 @@ object HdrTonemap {
                 linearSrgbF16.setColorSpace(ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
             }
             Logger.i("IO", "hdr.tonemap.done",
-                mapOf("space" to srcColorSpace.name, "headroomMax" to headroomMax, "premul" to isPremul, "headroom" to headroom))
-            return true
+                mapOf("space" to srcColorSpace.name, "headroomMax" to headroomMax,
+                    "premul" to isPremul, "headroom" to headroom,
+                    "alreadyLinear" to alreadyLinearFromConnector, "pqNormNits" to pqNormNits))
+             return true
         } finally {
             // Гарантированно усечём пул даже при исключениях
             HalfBufferPool.trimIfOversized()
@@ -81,7 +87,7 @@ object HdrTonemap {
 
     // ===== BT.2100 — PQ (ST.2084) EOTF =====
     // Нормируем до [0..1] для нашего пайплайна. Коэффициенты из стандарта.
-    private fun pqToLinear(v: Float): Float {
+    private fun pqToLinear(v: Float, normNits: Float): Float {
         val m1 = 2610f / 16384f
         val m2 = 2523f / 32f
         val c1 = 3424f / 4096f
@@ -90,9 +96,9 @@ object HdrTonemap {
         val vp = max(v, 0f).toDouble().pow(1.0 / m2).toFloat()
         val num = max(vp - c1, 0f)
         val den = c2 - c3 * vp
-        val l = (num / den).toDouble().pow(1.0 / m1).toFloat() // относительная яркость
-        // грубая нормализация в [0..1] (для тонов 0..~1000 нит)
-        return (l / 1.0f).coerceIn(0f, 1.5f) // небольшой запас
+        val l = (num / den).toDouble().pow(1.0 / m1).toFloat() // относительная яркость (0..1) ≈ (0..10000 нит)
+        // Масштабируем так, чтобы 1.0 ≈ normNits (по умолчанию 1000 нит), без жёсткого клипа
+        return l * (10000f / normNits)
     }
 
     // ===== BT.2100 — HLG OETF^-1 (EOTF) =====
