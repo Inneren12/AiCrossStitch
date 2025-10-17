@@ -38,4 +38,11 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     // Короутины для DataStore и UI (Main dispatcher)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+      testImplementation("junit:junit:4.13.2")
+    testImplementation("io.mockk:mockk:1.13.12")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    testImplementation("app.cash.turbine:turbine:1.1.0")
+    testImplementation("com.google.truth:truth:1.4.2")
+    testImplementation("org.robolectric:robolectric:4.12.1")
+
 }
