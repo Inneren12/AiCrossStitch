@@ -1,4 +1,4 @@
-package com.appforcross.editor.quant
+package com.appforcross.quant
 
 import android.content.Context
 import android.graphics.Bitmap

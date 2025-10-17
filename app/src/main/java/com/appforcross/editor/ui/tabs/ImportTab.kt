@@ -26,7 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import com.appforcross.editor.prescale.PreScaleRunner
-import com.appforcross.editor.quant.QuantizeRunner
+import com.appforcross.quant.QuantizeRunner
 import kotlin.math.min
 import com.appforcross.editor.catalog.CatalogMapRunner
 import androidx.compose.material3.ExperimentalMaterial3Api
