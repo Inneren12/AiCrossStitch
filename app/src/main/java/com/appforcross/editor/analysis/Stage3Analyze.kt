@@ -14,7 +14,9 @@ data class AnalyzeResult(
     val preview: Bitmap,
     val metrics: Metrics,
     val masks: Masks,
-    val decision: SceneDecision
+    val decision: SceneDecision,
+    val sourceWidth: Int,
+    val sourceHeight: Int
     )
 
 data class Masks(
@@ -168,7 +170,14 @@ object Stage3Analyze {
             }
         } catch (_: Exception) { /* diag-сохранение опционально */ }
 
-        return AnalyzeResult(preview, metrics, masks, decision)
+        return AnalyzeResult(
+            preview = preview,
+            metrics = metrics,
+            masks = masks,
+            decision = decision,
+            sourceWidth = dec.width,
+            sourceHeight = dec.height
+        )
     }
 
     // -------- Scratch-пулы для снижения аллокаций (ThreadLocal) --------
