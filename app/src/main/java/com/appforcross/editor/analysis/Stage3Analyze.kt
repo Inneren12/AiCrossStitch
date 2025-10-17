@@ -383,8 +383,12 @@ object Stage3Analyze {
                 val c=row[x]
                 val r=Color.red(c); val g=Color.green(c); val b=Color.blue(c)
                 val yv = 0.299*r + 0.587*g + 0.114*b
-                val cb = (-0.168736*r - 0.331264*g + 0.5*b + 128).toInt()
-                val cr = (0.5*r - 0.418688*g - 0.081312*b + 128).toInt()
+                val cb = (-0.168736*r - 0.331264*g + 0.5*b + 128)
+                    .roundToInt()
+                    .coerceIn(0, 255)
+                val cr = (0.5*r - 0.418688*g - 0.081312*b + 128)
+                    .roundToInt()
+                    .coerceIn(0, 255)
                 val cond = r>95 && g>40 && b>20 &&
                         (max(max(r,g),b) - min(min(r,g),b) > 15) &&
                         abs(r-g) > 15 && r>g && r>b &&
