@@ -42,14 +42,11 @@ object PreScaleRunner {
             "preset" to gate.spec.id, "Wst" to targetWst
         ))
         // На всякий случай: если не F16, приведём
-        val lin = if (prep.linearF16.config == Bitmap.Config.RGBA_F16) {
+        val lin = if (prep.linearF16.config == Bitmap.Config.RGBA_F16 && prep.linearF16.isMutable) {
             prep.linearF16
         } else {
-                val f16 = Bitmap.createBitmap(prep.linearF16.width, prep.linearF16.height, Bitmap.Config.RGBA_F16)
-            prep.linearF16.copyPixelsToBuffer(java.nio.ByteBuffer.allocate(prep.linearF16.byteCount))
-            prep.linearF16 // (если copyPixels недоступен, PreScale.run всё равно переконвертирует)
-            f16
-            }
+            prep.linearF16.copy(Bitmap.Config.RGBA_F16, /*mutable*/ true)
+        }
         val res = PreScale.run(
             linearF16 = lin,
             preset = gate.spec,
