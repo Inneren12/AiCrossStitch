@@ -51,10 +51,10 @@ object HdrTonemap {
                 val storedG = Half.toFloat(half[i + 1])
                 val storedB = Half.toFloat(half[i + 2])
                 val a = Half.toFloat(half[i + 3]).coerceIn(0f, 1f)
-                val alphaSafe = if (isPremul && a > 1e-6f) a else 1f
-                var r = if (isPremul && a > 1e-6f) storedR / alphaSafe else storedR
-                var g = if (isPremul && a > 1e-6f) storedG / alphaSafe else storedG
-                var b = if (isPremul && a > 1e-6f) storedB / alphaSafe else storedB
+                val hasPremulAlpha = isPremul && a > 1e-6f
+                var r = if (hasPremulAlpha) storedR / a else storedR
+                var g = if (hasPremulAlpha) storedG / a else storedG
+                var b = if (hasPremulAlpha) storedB / a else storedB
                 // Не повторяем EOTF, если пиксели уже LINEAR после ColorSpace.connect
                 if (!alreadyLinearFromConnector) {
                     if (isPQ) { r = pqToLinear(r, pqNormNits); g = pqToLinear(g, pqNormNits); b = pqToLinear(b, pqNormNits) }
@@ -68,9 +68,9 @@ object HdrTonemap {
                 g = max(0f, softKneeAbove1(g, headroom))
                 b = max(0f, softKneeAbove1(b, headroom))
                 // Возврат в премультиплированное пространство при необходимости
-                val outR = if (isPremul) r * a else r
-                val outG = if (isPremul) g * a else g
-                val outB = if (isPremul) b * a else b
+                val outR = if (isPremul) (r * a).coerceIn(0f, 1f) else r.coerceIn(0f, 1f)
+                val outG = if (isPremul) (g * a).coerceIn(0f, 1f) else g.coerceIn(0f, 1f)
+                val outB = if (isPremul) (b * a).coerceIn(0f, 1f) else b.coerceIn(0f, 1f)
                 // Запись обратно в half
                 half[i    ] = Half.toHalf(outR)
                 half[i + 1] = Half.toHalf(outG)

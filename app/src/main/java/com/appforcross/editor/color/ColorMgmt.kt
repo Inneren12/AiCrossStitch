@@ -19,14 +19,14 @@ object ColorMgmt {
     @SuppressLint("HalfFloat")
     fun toLinearSrgbF16(src: Bitmap, srcCs: ColorSpace?): Bitmap {
         val srcBitmap = if (Build.VERSION.SDK_INT >= 26 && src.config == Bitmap.Config.HARDWARE) {
-            // copy() гарантированно возвращает программный буфер; используем 8888, т.к. copy в F16 может не поддерживаться
-            val fallbackConfig = if (srcCs == ColorSpace.get(ColorSpace.Named.LINEAR_SRGB) || srcCs == ColorSpace.get(ColorSpace.Named.SRGB)) {
-                Bitmap.Config.ARGB_8888
-            } else {
-                Bitmap.Config.RGBA_F16
+            // Аппаратные битмапы запрещают прямой доступ к пикселям: делаем безопасную копию в софт-буфер.
+            val preferred = src.copy(Bitmap.Config.RGBA_F16, /*mutable*/ false)
+            val software = preferred ?: src.copy(Bitmap.Config.ARGB_8888, /*mutable*/ false)
+            requireNotNull(software) { "Unable to copy HARDWARE bitmap to a software buffer" }
+            if (software.colorSpace == null && srcCs != null && Build.VERSION.SDK_INT >= 26) {
+                software.setColorSpace(srcCs)
             }
-            src.copy(fallbackConfig, /*mutable*/ false)
-                ?: throw IllegalStateException("Unable to copy HARDWARE bitmap to software buffer")
+            software
         } else {
             src
         }
