@@ -108,9 +108,10 @@ object Dither {
             return best
         }
         val serpentine = true
-        for (y in 0 until h) {
+        for (yy in 0 until h) {
+            val forward = !serpentine || yy % 2 == 0
+            val y = if (forward) yy else (h - 1 - yy)
             val base = y * w
-            val forward = !serpentine || y % 2 == 0
             if (forward) {
                 for (x in 0 until w) {
                     val idxPix = base + x
@@ -185,9 +186,10 @@ object Dither {
             }
         }
         val serpentine = true
-        for (y in 0 until h) {
+        for (yy in 0 until h) {
+            val forward = !serpentine || yy%2==0
+            val y = if (forward) yy else (h-1-yy)
             val base = y*w
-            val forward = !serpentine || y%2==0
             if (forward) {
                 for (x in 0 until w) {
                     val idx = base + x
