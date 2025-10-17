@@ -57,6 +57,15 @@ object Stage3Analyze {
         // 0) Декодим исходник (с EXIF-поворотом) и строим превью ≤1024
         val dec = Decoder.decodeUri(ctx, uri)
         val preview = buildPreview(dec.bitmap, PREVIEW_LONG_SIDE)
+        // Как только построили уменьшенное превью — освобождаем исходный буфер,
+        // иначе до сборки мусора держим в памяти оба битмапа (оригинал+preview).
+        if (preview !== dec.bitmap && dec.exclusive) {
+            try {
+                dec.bitmap.recycle()
+            } catch (_: Throwable) {
+                Logger.w("ANALYZE", "preview.recycle_failed", mapOf("exclusive" to dec.exclusive))
+            }
+        }
         Logger.i("ANALYZE", "preview.built", mapOf("w" to preview.width, "h" to preview.height))
 
         // 1) Подготовка плоскостей (linear luma + OKLab A/B для шума/каста)
@@ -68,7 +77,7 @@ object Stage3Analyze {
 
         // 3) Маски
         val edgeMask = buildEdgeMask(sob.mag, preview.width, preview.height)
-        val (var7, var3, var9) = localVariance3_7_9(planes.luma, preview.width, preview.height)
+        val (var3, var7, var9) = localVariance3_7_9(planes.luma, preview.width, preview.height)
         val flatMask = buildFlatMask(var7, preview.width, preview.height)
         val hiTexFine = thresholdMask(var3, quantile(var3, 0.7F), preview.width, preview.height)
         val hiTexCoarse = thresholdMask(var9, quantile(var9, 0.7F), preview.width, preview.height)
@@ -206,7 +215,13 @@ object Stage3Analyze {
         var f1 = FloatArray(0); var f2 = FloatArray(0)
         fun ensureF12(n: Int) { if (f1.size < n) f1 = FloatArray(n); if (f2.size < n) f2 = FloatArray(n) }
         // Ресайклимый буфер для масок (ALPHA_8)
-        var maskBytes = ByteArray(0); fun ensureMaskBytes(n: Int) { if (maskBytes.size < n) maskBytes = ByteArray(n) }
+        var maskBytes = ByteArray(0); var maskBytesUsed = 0
+        fun ensureMaskBytes(n: Int) {
+            if (maskBytes.size < n) {
+                maskBytes = ByteArray(n)
+                maskBytesUsed = 0
+            }
+        }
 
     }
     private val scratchTL = ThreadLocal.withInitial { Scratch() }
@@ -239,25 +254,18 @@ object Stage3Analyze {
                 val r = srgbToLinear(rf); val g = srgbToLinear(gf); val bl = srgbToLinear(bf)
                 l[idx] = (0.2126f*r + 0.7152f*g + 0.0722f*bl)
                 // OKLab A/B (приближённо, без конвертора)
-                val ok = rgbLinearToOKLab(r, g, bl)
-                a[idx] = ok[1]; b[idx] = ok[2]
+                val lComp = 0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * bl
+                val mComp = 0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * bl
+                val sComp = 0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * bl
+                val l_ = cbrtF(lComp); val m_ = cbrtF(mComp); val s_ = cbrtF(sComp)
+                a[idx] = 1.9779984951f * l_ - 2.4285922050f * m_ + 0.4505937099f * s_
+                b[idx] = 0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_
                 idx++
             }
         }
         return WorkingPlanes(l, a, b)
     }
 
-    // OKLab из линейного RGB (сокращённая форма)
-    private fun rgbLinearToOKLab(r: Float, g: Float, b: Float): FloatArray {
-        val l = 0.4122214708f * r + 0.5363325363f * g + 0.0514459929f * b
-        val m = 0.2119034982f * r + 0.6806995451f * g + 0.1073969566f * b
-        val s = 0.0883024619f * r + 0.2817188376f * g + 0.6299787005f * b
-        val l_ = cbrtF(l); val m_ = cbrtF(m); val s_ = cbrtF(s)
-        val L = 0.2104542553f * l_ + 0.7936177850f * m_ - 0.0040720468f * s_
-        val A = 1.9779984951f * l_ - 2.4285922050f * m_ + 0.4505937099f * s_
-        val B = 0.0259040371f * l_ + 0.7827717662f * m_ - 0.8086757660f * s_
-        return floatArrayOf(L, A, B)
-    }
     // Знако-сохраняющий корень кубический — корректнее для OKLab (LMS могут быть < 0).
     private fun cbrtF(x: Float): Float = when {
         x == 0f -> 0f
@@ -383,8 +391,12 @@ object Stage3Analyze {
                 val c=row[x]
                 val r=Color.red(c); val g=Color.green(c); val b=Color.blue(c)
                 val yv = 0.299*r + 0.587*g + 0.114*b
-                val cb = (-0.168736*r - 0.331264*g + 0.5*b + 128).toInt()
-                val cr = (0.5*r - 0.418688*g - 0.081312*b + 128).toInt()
+                val cb = (-0.168736*r - 0.331264*g + 0.5*b + 128)
+                    .roundToInt()
+                    .coerceIn(0, 255)
+                val cr = (0.5*r - 0.418688*g - 0.081312*b + 128)
+                    .roundToInt()
+                    .coerceIn(0, 255)
                 val cond = r>95 && g>40 && b>20 &&
                         (max(max(r,g),b) - min(min(r,g),b) > 15) &&
                         abs(r-g) > 15 && r>g && r>b &&
@@ -438,7 +450,9 @@ object Stage3Analyze {
         dilateInto(a, b, w, h, radius)     // open = erode → dilate
         dilateInto(b, a, w, h, radius)
         erodeInto(a, b, w, h, radius)      // close = dilate → erode
-        return b.copyOf() // итог как новый массив; внутри — без лишних аллокаций
+        // bool-буферы scratch могут быть больше текущего размера маски (если предыдущий кадр был крупнее),
+        // поэтому обязательно обрезаем до n, иначе вернём массив с «хвостом» из старых данных, и проценты/битмапы поплывут.
+        return b.copyOf(n)
     }
     private fun erodeInto(src:BooleanArray, dst:BooleanArray, w:Int, h:Int, radius:Int) {
         for (y in 0 until h) for (x in 0 until w) {
@@ -664,17 +678,63 @@ object Stage3Analyze {
     }
     private fun maskToBitmap(mask: BooleanArray, w:Int, h:Int): Bitmap {
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        val stride = out.rowBytes
+        val required = stride * h
         val s = scratch()
-        s.ensureMaskBytes(mask.size)
+        s.ensureMaskBytes(required)
         val arr = s.maskBytes
-        for (i in mask.indices) arr[i] = if (mask[i]) 0xFF.toByte() else 0x00
+        if (s.maskBytesUsed > required) {
+            java.util.Arrays.fill(arr, required, s.maskBytesUsed, 0.toByte())
+        }
+        var src = 0
+        var dst = 0
+        for (y in 0 until h) {
+            var x = 0
+            while (x < w) {
+                arr[dst + x] = if (mask[src++]) 0xFF.toByte() else 0x00
+                x++
+            }
+            if (stride > w) {
+                java.util.Arrays.fill(arr, dst + w, dst + stride, 0.toByte())
+            }
+            dst += stride
+        }
+        s.maskBytesUsed = required
         // используем wrap с ограничением длины, реюзая один и тот же массив
-        out.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(arr, 0, mask.size))
+        out.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(arr, 0, required))
         return out
     }
     private fun maskPct(mask: BooleanArray): Double = mask.count { it }.toDouble() / mask.size
     private fun savePng(bmp: Bitmap, file: java.io.File) {
-        java.io.FileOutputStream(file).use { fos -> bmp.compress(Bitmap.CompressFormat.PNG, 100, fos) }
+        val toSave = if (bmp.config == Bitmap.Config.ALPHA_8) {
+            val w = bmp.width
+            val h = bmp.height
+            val stride = bmp.rowBytes
+            val alpha = ByteArray(stride * h)
+            val buf = java.nio.ByteBuffer.wrap(alpha)
+            bmp.copyPixelsToBuffer(buf)
+            val pixels = IntArray(w * h)
+            var src = 0
+            var dst = 0
+            for (y in 0 until h) {
+                var x = 0
+                while (x < w) {
+                    val aByte = alpha[src + x].toInt() and 0xFF
+                    val argb = (aByte shl 24) or (aByte shl 16) or (aByte shl 8) or aByte
+                    pixels[dst++] = argb
+                    x++
+                }
+                src += stride
+            }
+            Bitmap.createBitmap(pixels, 0, w, w, h, Bitmap.Config.ARGB_8888)
+        } else bmp
+        try {
+            java.io.FileOutputStream(file).use { fos ->
+                toSave.compress(Bitmap.CompressFormat.PNG, 100, fos)
+            }
+        } finally {
+            if (toSave !== bmp) toSave.recycle()
+        }
     }
 
     private fun colors5bitAndTop8(bmp: Bitmap): Pair<Int, Double> {
