@@ -37,6 +37,23 @@ import com.appforcross.editor.export.PdfExportRunner
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import android.graphics.BitmapFactory
+import org.json.JSONObject
+import org.json.JSONArray
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import android.graphics.Color as AndroidColor
+import androidx.compose.ui.graphics.Color as ComposeColor
+import com.appforcross.editor.pattern.PreviewBuilder
+import com.appforcross.editor.pattern.PatternDiagnostics
+import com.appforcross.editor.logging.LogcatKV
+import java.lang.Integer.max
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -84,6 +101,26 @@ fun ImportTab() {
     var previewBmp by remember { mutableStateOf<Bitmap?>(null) }
     var previewBusy by remember { mutableStateOf(false) }
 
+    // ---------- PNG Preview & Legend (new) ----------
+    // PNG preview bitmap (pattern_preview.png)
+    var pngPreviewBmp by remember { mutableStateOf<Bitmap?>(null) }
+    // Legend state parsed from pattern_legend.json
+    data class LegendRowUI(
+        val idx: Int,
+        val code: String?,
+        val name: String?,
+        val rgb: Int,
+        val baseSymbol: String,
+        var symbol: String
+    )
+    var legendRows by remember { mutableStateOf<List<LegendRowUI>?>(null) }
+    var legendBase by remember { mutableStateOf<Map<Int, String>>(emptyMap()) }
+    var legendOverrides by remember { mutableStateOf<MutableMap<Int, String>>(mutableMapOf()) }
+    var legendJsonRoot by remember { mutableStateOf<JSONObject?>(null) }
+    var legendPath by remember { mutableStateOf<String?>(null) }
+    var symbolDialogFor by remember { mutableStateOf<Int?>(null) }
+    var symbolDraft by remember { mutableStateOf("") }
+
     // Save As launcher (SAF)
     val saveAs = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/pdf")
@@ -117,6 +154,29 @@ fun ImportTab() {
                 } catch (e: Exception) {
                     err = "Save As failed: $e"
                     com.appforcross.editor.logging.Logger.e("UI","EXPORT.saveas.fail", err = e)
+                } finally { busy = false }
+            }
+        }
+    }
+
+    // Save-as PNG (from pattern_preview.png)
+    val savePng = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("image/png")
+    ) { uri: Uri? ->
+        val p = patOut
+        val srcPath = p?.previewPng
+        if (uri != null && srcPath != null) {
+            scope.launch {
+                busy = true; err = null
+                try {
+                    withContext(Dispatchers.IO) {
+                        FileInputStream(File(srcPath)).use { input ->
+                            ctx.contentResolver.openOutputStream(uri, "w")?.use { out -> input.copyTo(out) }
+                        }
+                    }
+                } catch (e: Exception) {
+                    err = "Export PNG failed: $e"
+                    Logger.e("UI","EXPORT.png.fail", err = e)
                 } finally { busy = false }
             }
         }
@@ -504,66 +564,251 @@ fun ImportTab() {
         }
 
         // ---------- PDF Preview (before export) ----------
-        if (qOut != null && patOut != null) {
+        // ---------- Pattern Preview (PNG) ----------
+        if (patOut != null) {
             HorizontalDivider()
-            Text("PDF Preview", style = MaterialTheme.typography.titleMedium)
+            Text("Pattern Preview (PNG)", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(4.dp))
-            // ререндер превью при изменении параметров
-            LaunchedEffect(qOut?.colorPng, patOut?.indexBin, cellSizeMm, marginMm, overlap, renderSymbols, pageA3, previewPage) {
-                val q = qOut!!; val p = patOut!!
-                previewBusy = true
-                try {
-                    val prev = withContext(Dispatchers.Default) {
-                        PdfExportRunner.renderPreviewBitmap(
-                            ctx = ctx,
-                            indexBinPath = p.indexBin,
-                            colorPngPath = q.colorPng,
-                            palette = q.palette,
-                            legendJsonPath = p.legendJson,
-                            opt = PdfExportRunner.Options(
-                                page = if (pageA3) PdfExportRunner.PageSize.A3 else PdfExportRunner.PageSize.A4,
-                                orientation = PdfExportRunner.Orientation.PORTRAIT,
-                                cellSizeMm = cellSizeMm.toFloatOrNull() ?: 3.0f,
-                                marginMm = marginMm.toFloatOrNull() ?: 10f,
-                                overlapCells = overlap.toIntOrNull() ?: 8,
-                                boldEvery = 10,
-                                render = if (renderSymbols) PdfExportRunner.RenderMode.SYMBOLS else PdfExportRunner.RenderMode.COLOR,
-                                includeLegend = true
-                            ),
-                            pageIndex = previewPage.coerceAtLeast(1),
-                            maxSidePx = 1400
+
+            // Пересобираем превью из quant_color.png + сетка (быстро) и сразу грузим
+            LaunchedEffect(patOut?.previewPng, qOut?.colorPng) {
+                val outPath = patOut?.previewPng
+                val colorPng = qOut?.colorPng
+                if (outPath != null && colorPng != null) {
+                    withContext(Dispatchers.IO) {
+                        // 6px клетка, жирная каждая 10-я. Можно связать с вводом Cell size mm, если нужно.
+                        PreviewBuilder.fromQuantColor(
+                            quantColorPath = colorPng,
+                            outPath = outPath,
+                            cellPx = 6,
+                            boldEvery = 10,
+                            maxSidePx = 2800
+                        )
+                        // Диагностика: вызываем существующий метод ДВАЖДЫ (квант-индекс и паттерн-индекс)
+                        val palSize = try { qOut?.palette?.size } catch (_: Throwable) { null }
+                        // 1) Квант-индекс (рядом с quant_color.png: <dir>/index.bin)
+                        val qIndexPath = File(colorPng).parentFile?.resolve("index.bin")?.absolutePath
+                        PatternDiagnostics.logQuantAndIndexConsistency(
+                            quantColorPath = colorPng,
+                            indexBinPath = qIndexPath,
+                            paletteSize = palSize
+                        )
+                        // 2) Паттерн-индекс (pattern_index.bin из S9)
+                        PatternDiagnostics.logQuantAndIndexConsistency(
+                            quantColorPath = colorPng,
+                            indexBinPath = patOut?.indexBin,
+                            paletteSize = palSize
                         )
                     }
-                    totalPages = prev.totalPages
-                    if (previewPage > totalPages) previewPage = totalPages
-                    previewBmp = prev.bitmap
-                } catch (e: Exception) {
-                    err = "Preview failed: $e"
-                    com.appforcross.editor.logging.Logger.e("UI","EXPORT.preview.fail", err = e)
-                } finally {
-                    previewBusy = false
-                }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(enabled = !previewBusy && previewPage > 1, onClick = { previewPage = (previewPage - 1).coerceAtLeast(1) }) {
-                    Text("◀ Prev")
-                }
-                Text("Page $previewPage / ${maxOf(1, totalPages)}")
-                OutlinedButton(enabled = !previewBusy && (previewPage < maxOf(1, totalPages)), onClick = { previewPage = (previewPage + 1).coerceAtMost(maxOf(1,totalPages)) }) {
-                    Text("Next ▶")
-                }
-            }
-            Spacer(Modifier.height(6.dp))
-            Box(Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 520.dp)) {
-                val bm = previewBmp
-                if (bm != null) {
-                    Image(bm.asImageBitmap(), contentDescription = "PDF preview", modifier = Modifier.fillMaxSize())
+                    pngPreviewBmp = withContext(Dispatchers.IO) {
+                        BitmapFactory.decodeFile(outPath)?.also { bm ->
+                            val meta = mapOf("path" to outPath, "w" to bm.width, "h" to bm.height)
+                            Logger.i("PREVIEW", "load.png", meta)
+                            LogcatKV.i("PREVIEW", "load.png", meta)
+                             }
+                    }
                 } else {
-                    Text(if (previewBusy) "Rendering preview…" else "Preview not available")
+                    // fallback: просто попробовать прочитать если уже есть
+                    val path = patOut?.previewPng
+                    pngPreviewBmp = withContext(Dispatchers.IO) {
+                        path?.let { p ->
+                            BitmapFactory.decodeFile(p)?.also { bm ->
+                                val meta = mapOf("path" to p, "w" to bm.width, "h" to bm.height)
+                                Logger.i("PREVIEW", "load.png", meta)
+                                LogcatKV.i("PREVIEW", "load.png", meta)
+                            }
+                        }
+                    }
                 }
+            }
+
+            Box(Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 520.dp)) {
+                val bm = pngPreviewBmp
+                if (bm != null) {
+                    Image(bm.asImageBitmap(), contentDescription = "Pattern preview (PNG)", modifier = Modifier.fillMaxSize())
+                } else {
+                    Text("Preview not available. Build Pattern to generate pattern_preview.png")
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(
+                    enabled = !busy && (patOut?.previewPng != null),
+                    onClick = { savePng.launch("AiCrossStitch_pattern.png") }
+                ) { Text("Export PNG") }
+                Text(patOut?.previewPng ?: "", style = MaterialTheme.typography.bodySmall)
             }
         }
 
+        // ---------- Legend (colors + symbols) with editing ----------
+        if (patOut != null) {
+            HorizontalDivider()
+            Text("Legend (after Pattern)", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+
+            // Load legend when path changes
+            LaunchedEffect(patOut?.legendJson) {
+                val path = patOut?.legendJson
+                legendPath = path
+                if (path != null) {
+                    try {
+                        val root = withContext(Dispatchers.IO) {
+                            val txt = File(path).takeIf { it.exists() }?.readText()
+                            txt?.let { JSONObject(it) }
+                        }
+                        legendJsonRoot = root
+                        val entries = root?.optJSONArray("entries") ?: JSONArray()
+                        val overridesObj = root?.optJSONObject("overrides")
+                        val tmpRows = mutableListOf<LegendRowUI>()
+                        val base = mutableMapOf<Int, String>()
+                        val ov = mutableMapOf<Int, String>()
+                        for (i in 0 until entries.length()) {
+                            val e = entries.getJSONObject(i)
+                            val idx = e.getInt("idx")
+                            val code = e.optString("code", null)
+                            val name = e.optString("name", null)
+                            val rgbAny = e.opt("rgb")
+                            val rgb = when (rgbAny) {
+                                is String -> AndroidColor.parseColor(rgbAny)
+                                is Int -> rgbAny
+                                is Long -> rgbAny.toInt()
+                                else -> 0xff000000.toInt()
+                            }
+                            val baseSym = e.optString("symbol", "?")
+                            val effSym = overridesObj?.optString(idx.toString(), baseSym) ?: baseSym
+                            base[idx] = baseSym
+                            if (effSym != baseSym) ov[idx] = effSym
+                            tmpRows += LegendRowUI(idx, code, name, rgb, baseSym, effSym)
+                        }
+                        legendBase = base
+                        legendOverrides = ov
+                        legendRows = tmpRows
+                    } catch (e: Exception) {
+                        err = "Legend load failed: $e"
+                        Logger.e("UI","LEGEND.load.fail", err = e)
+                        legendRows = null
+                    }
+                } else {
+                    legendRows = null
+                }
+            }
+
+            fun saveLegendOverridesNow(rows: List<LegendRowUI>) {
+                val base = legendBase
+                val newOv = mutableMapOf<Int, String>()
+                rows.forEach { row ->
+                    val b = base[row.idx]
+                    if (b == null || b != row.symbol) {
+                        newOv[row.idx] = row.symbol
+                    }
+                }
+                legendOverrides = newOv
+                val root = legendJsonRoot ?: return
+                val ovObj = JSONObject()
+                newOv.forEach { (k, v) -> ovObj.put(k.toString(), v) }
+                root.put("overrides", ovObj)
+                try {
+                    val path = legendPath ?: return
+                    File(path).writeText(root.toString())
+                    Logger.i("UI","LEGEND.save", mapOf("overrides" to newOv.size))
+                } catch (e: Exception) {
+                    err = "Legend save failed: $e"
+                    Logger.e("UI","LEGEND.save.fail", err = e)
+                }
+            }
+
+            // Available symbols (safe subset)
+            val defaultSymbols = remember {
+                listOf("■","●","▲","◆","○","□","△","◇","✚","✖","+","x","★","☆","◼","◻",
+                    "◉","◊","▣","▢","•","↑","↓","←","→","≡","≈","Ø","Δ","Ω",
+                    "1","2","3","4","5","6","7","8","9","0",
+                    "A","B","C","D","E","F","G","H","I","J","K","L","M",
+                    "N","O","P","Q","R","S","T","U","V","W","X","Y","Z")
+            }
+
+            @Composable
+            fun LegendList(rows: List<LegendRowUI>) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    rows.forEach { r ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, MaterialTheme.colorScheme.outline)
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                Modifier.size(22.dp)
+                                    .border(1.dp, MaterialTheme.colorScheme.outline)
+                                    .background(ComposeColor(r.rgb))
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(r.code ?: "Idx ${r.idx}")
+                                r.name?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                            }
+                            Text(r.symbol, style = MaterialTheme.typography.headlineSmall)
+                            Spacer(Modifier.width(8.dp))
+                            OutlinedButton(
+                                enabled = !busy,
+                                onClick = { symbolDialogFor = r.idx; symbolDraft = r.symbol }
+                            ) { Text("Change") }
+                        }
+                    }
+                }
+            }
+            legendRows?.let { rows ->
+                LegendList(rows)
+                Spacer(Modifier.height(8.dp))
+                Text("Tap “Change” to edit a symbol. Conflicts auto‑resolve (swap) or by first free symbol.", style = MaterialTheme.typography.bodySmall)
+            } ?: Text("Legend not available. Build Pattern first.")
+
+            // Symbol picker dialog
+            if (symbolDialogFor != null && legendRows != null) {
+                val idx = symbolDialogFor!!
+                AlertDialog(
+                    onDismissRequest = { symbolDialogFor = null },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            val desired = (symbolDraft.ifEmpty { "?" }).take(1)
+                            val rows = legendRows!!.toMutableList()
+                            val i = rows.indexOfFirst { it.idx == idx }
+                            if (i >= 0) {
+                                val inUse = rows.indexOfFirst { it.symbol == desired }
+                                if (inUse >= 0 && inUse != i) {
+                                    // swap
+                                    val tmp = rows[i].symbol
+                                    rows[i] = rows[i].copy(symbol = desired)
+                                    rows[inUse] = rows[inUse].copy(symbol = tmp)
+                                } else if (inUse == -1) {
+                                    rows[i] = rows[i].copy(symbol = desired)
+                                } else {
+                                    // no-op (same symbol)
+                                }
+                                legendRows = rows
+                                saveLegendOverridesNow(rows)
+                            }
+                            symbolDialogFor = null
+                        }) { Text("Apply") }
+                                    },
+                    dismissButton = { TextButton(onClick = { symbolDialogFor = null }) { Text("Cancel") } },
+                    title = { Text("Choose symbol") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = symbolDraft,
+                                onValueChange = { v -> symbolDraft = v.take(2) }, // небольшой гард
+                                label = { Text("Custom symbol") }
+                            )
+                            FlowRowOrColumn(
+                                symbols = defaultSymbols,
+                                onPick = { ch -> symbolDraft = ch }
+                            )
+                        }
+                    }
+                )
+            }
+        }
         // ---------- Export (PDF) ----------
         if (qOut != null && patOut != null) {
             HorizontalDivider()
@@ -618,6 +863,26 @@ fun ImportTab() {
         err?.let {
             Spacer(Modifier.height(8.dp))
             Text("Error: $it", color = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
+@Composable
+private fun FlowRowOrColumn(
+    symbols: List<String>,
+    onPick: (String) -> Unit
+) {
+    // Простая "обёртка": если у проекта нет FlowRow — выводим колонкой с переносами.
+    // Можно заменить на LazyVerticalGrid при наличии зависимости.
+    val chunk = 8
+    val rows = remember(symbols) { symbols.chunked(chunk) }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        rows.forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                row.forEach { s ->
+                    OutlinedButton(onClick = { onPick(s) }) { Text(s) }
+                }
+            }
         }
     }
 }
