@@ -46,15 +46,22 @@ object Logger {
         i("IO", "logger.level.update", mapOf("minLevel" to level.name))
     }
 
-    /** Корректное завершение: останавливаем приём, сбрасываем и закрываем писатель. */
     /**
-    +     * Принудительное «осушение» очереди записи — полезно перед экспортом диагностики.
-    +     * Реализовано барьером: пустая задача, которую дожидаемся, гарантирует выполнение всех предыдущих.
-    +     */
+     * Принудительное «осушение» очереди записи — полезно перед экспортом диагностики.
+     * Реализовано барьером: задача с flush гарантирует выполнение всех предыдущих логов.
+     */
     fun flush(timeoutMs: Long = 3000) {
         if (!running.get()) return
         try {
-            val fut = writerExecutor.submit {}
+            val fut = writerExecutor.submit {
+                writeLock.lock()
+                try {
+                    writer?.flush()
+                } catch (_: IOException) {
+                } finally {
+                    writeLock.unlock()
+                }
+            }
             fut.get(timeoutMs, TimeUnit.MILLISECONDS)
         } catch (_: RejectedExecutionException) {
             // пул уже закрыт — нечего ждать
@@ -68,6 +75,21 @@ object Logger {
         running.set(false)
         flush(2_000)
         writerExecutor.shutdown()
+        writeLock.lock()
+        try {
+            try {
+                writer?.flush()
+            } catch (_: IOException) {
+            }
+            try {
+                writer?.close()
+            } catch (_: IOException) {
+            } finally {
+                writer = null
+            }
+        } finally {
+            writeLock.unlock()
+        }
     }
 
     fun d(cat: String, msg: String, data: Map<String, Any?> = emptyMap(), req: String? = null, tile: String? = null) =
@@ -79,7 +101,11 @@ object Logger {
     fun e(cat: String, msg: String, data: Map<String, Any?> = emptyMap(),
           req: String? = null, tile: String? = null, err: Throwable? = null
     ) {
-        val m = if (err != null) data + ("error" to (err.message ?: err.toString())) + ("stack" to err.stackTraceToString()) else data
+        val m = if (err != null) {
+            data + ("error" to (err.message ?: err.toString())) + ("stack" to err.stackTraceToString())
+        } else {
+            data
+        }
         log(LogLevel.ERROR, cat, msg, m, req, tile)
     }
 
@@ -97,17 +123,17 @@ object Logger {
                 LogLevel.ERROR -> Log.e(tag, msg)
             }
         }
-        val target = fileRef.get() ?: return
-        if (fileRef.get() == null) return
         if (!running.get()) return
         try {
-            // Захватываем ссылку локально, чтобы не потерять её в лямбде
-            val dest = target
             writerExecutor.execute {
                 try {
-                    BufferedWriter(FileWriter(dest, true)).use {
-                        it.write(line)
-                        it.flush()
+                    writeLock.lock()
+                    try {
+                        val w = writer ?: return@execute
+                        w.write(line)
+                        w.flush()
+                    } finally {
+                        writeLock.unlock()
                     }
                 } catch (io: IOException) {
                     Log.e("AiX/Logger", "write fail: ${io.message}")

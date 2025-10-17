@@ -21,13 +21,12 @@ import com.appforcross.editor.logging.Logger
 import com.appforcross.editor.preset.PresetGateResult
 import com.appforcross.editor.preset.PresetGateOptions
 import com.appforcross.editor.preset.PresetGate
-import com.appforcross.editor.io.Decoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import com.appforcross.editor.prescale.PreScaleRunner
-import com.appforcross.editor.quant.QuantizeRunner
+import com.appforcross.quant.QuantizeRunner
 import kotlin.math.min
 
 @Composable
@@ -40,6 +39,7 @@ fun ImportTab() {
     var err by remember { mutableStateOf<String?>(null) }
 
     var analyze by remember { mutableStateOf<AnalyzeResult?>(null) }
+    var sourceWidth by remember { mutableStateOf<Int?>(null) }
     var gate by remember { mutableStateOf<PresetGateResult?>(null) }
     var targetWst by rememberSaveable { mutableStateOf(240f) } // по умолчанию «A3/14ct коридор»
 
@@ -75,7 +75,10 @@ fun ImportTab() {
                 targetWst = targetWst.roundToInt(),
                 onBusy = { busy = it },
                 onError = { err = it },
-                onAnalyze = { analyze = it },
+                onAnalyze = {
+                    analyze = it
+                    sourceWidth = it.sourceWidth
+                },
                 onGate = { gate = it }
             )
         }
@@ -119,11 +122,10 @@ fun ImportTab() {
                     onClick = {
                         // Пересчитать только PresetGate под новый Wst (без повторного Stage‑3)
                         val a = analyze ?: return@OutlinedButton
-                        val uri = pickedUri ?: return@OutlinedButton
                         scope.launch {
                             busy = true; err = null
                             try {
-                                val wpx = withContext(Dispatchers.Default) { Decoder.decodeUri(ctx, uri).width }
+                                val wpx = sourceWidth ?: a.sourceWidth
                                 val res = withContext(Dispatchers.Default) {
                                     PresetGate.run(
                                         an = a,
@@ -333,7 +335,7 @@ private fun runAnalyzeAndGate(
         try {
             val analyze = withContext(Dispatchers.Default) { Stage3Analyze.run(ctx, uri) }
             onAnalyze(analyze)
-            val wpx = withContext(Dispatchers.Default) { Decoder.decodeUri(ctx, uri).width }
+            val wpx = analyze.sourceWidth
             val gate = withContext(Dispatchers.Default) {
                 PresetGate.run(analyze, sourceWpx = wpx, options = PresetGateOptions(targetWst = targetWst))
             }
