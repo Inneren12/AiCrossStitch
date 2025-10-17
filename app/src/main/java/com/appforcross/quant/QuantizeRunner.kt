@@ -31,6 +31,7 @@ object QuantizeRunner {
         val indexBin: String,
         val paletteJson: String,
         val k: Int,
+        val palette: IntArray,
         val deMin: Double,
         val deMed: Double,
         val avgErr: Double
@@ -156,6 +157,7 @@ object QuantizeRunner {
             indexBin = indexBin.absolutePath,
             paletteJson = palJson.absolutePath,
             k = qres.metrics.k,
+            palette = pal,
             deMin = qres.metrics.deMin,
             deMed = qres.metrics.deMed,
             avgErr = qres.metrics.avgErr
