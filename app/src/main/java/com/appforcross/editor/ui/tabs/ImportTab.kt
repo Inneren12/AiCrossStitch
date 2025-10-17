@@ -26,7 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import com.appforcross.editor.prescale.PreScaleRunner
-import com.appforcross.quant.QuantizeRunner
+import com.appforcross.editor.quant.QuantizeRunner
 import kotlin.math.min
 import com.appforcross.editor.catalog.CatalogMapRunner
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -36,23 +36,18 @@ import com.appforcross.editor.export.PdfExportRunner
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import android.graphics.BitmapFactory
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import android.graphics.Color as AndroidColor
 import androidx.compose.ui.graphics.Color as ComposeColor
 import com.appforcross.editor.pattern.PreviewBuilder
 import com.appforcross.editor.pattern.PatternDiagnostics
 import com.appforcross.editor.logging.LogcatKV
-import java.lang.Integer.max
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

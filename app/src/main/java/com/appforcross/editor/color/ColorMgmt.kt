@@ -52,7 +52,7 @@ object ColorMgmt {
             // Полностью плавающая обработка: читаем float-компоненты и пишем half‑float без 8‑бит квантизации.
             // Конвертация блоком, без getColor на пиксель
             val dst = ColorSpace.get(ColorSpace.Named.LINEAR_SRGB)
-            // ⬇️ src должен быть non-null: используем effectiveCs вместо nullable srcCs
+            // src должен быть non-null: используем effectiveCs вместо nullable srcCs
             val connector = ColorSpace.connect(effectiveCs, dst)
                 val total = w * h * 4
             val half = HalfBufferPool.obtain(total)
@@ -139,6 +139,58 @@ object ColorMgmt {
                 HalfBufferPool.trimIfOversized()
             }
             Logger.w("COLOR", "gamut.assume_srgb", mapOf("dst" to "Linear sRGB (F16)"))
+        }
+        return out
+    }
+
+    /** Преобразовать linear sRGB RGBA_F16 в sRGB ARGB_8888 (для PNG/preview). */
+    @SuppressLint("HalfFloat")
+    fun linearSrgbF16ToSrgb8888(src: Bitmap): Bitmap {
+        val w = src.width
+        val h = src.height
+        val needsLinearConvert =
+            (Build.VERSION.SDK_INT >= 26 && src.config == Bitmap.Config.RGBA_F16
+                    && src.colorSpace == ColorSpace.get(ColorSpace.Named.LINEAR_SRGB))
+        val out = if (Build.VERSION.SDK_INT >= 26) {
+            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888, /*hasAlpha*/ true, ColorSpace.get(ColorSpace.Named.SRGB))
+        } else {
+            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        }
+        if (!needsLinearConvert) {
+            // Уже sRGB 8-бит: достаточно скопировать пиксели.
+            val ints = IntArray(w * h)
+            src.getPixels(ints, 0, w, 0, 0, w, h)
+            out.setPixels(ints, 0, w, 0, 0, w, h)
+            return out
+        }
+        val total = w * h
+        val half = HalfBufferPool.obtain(total * 4)
+        try {
+            val sb = ShortBuffer.wrap(half, 0, total * 4)
+            src.copyPixelsToBuffer(sb)
+            sb.rewind()
+            val ints = IntArray(total)
+            var p = 0
+            var i = 0
+            while (i < total) {
+                val r = Half.toFloat(half[p++])
+                val g = Half.toFloat(half[p++])
+                val b = Half.toFloat(half[p++])
+                val a = Half.toFloat(half[p++])
+                val sr = linearToSrgb(r)
+                val sg = linearToSrgb(g)
+                val sbc = linearToSrgb(b)
+                val sa = a.coerceIn(0f, 1f)
+                ints[i++] = Color.argb(
+                    (sa * 255f + 0.5f).toInt().coerceIn(0, 255),
+                    (sr.coerceIn(0f, 1f) * 255f + 0.5f).toInt().coerceIn(0, 255),
+                    (sg.coerceIn(0f, 1f) * 255f + 0.5f).toInt().coerceIn(0, 255),
+                    (sbc.coerceIn(0f, 1f) * 255f + 0.5f).toInt().coerceIn(0, 255)
+                )
+            }
+            out.setPixels(ints, 0, w, 0, 0, w, h)
+        } finally {
+            HalfBufferPool.trimIfOversized()
         }
         return out
     }

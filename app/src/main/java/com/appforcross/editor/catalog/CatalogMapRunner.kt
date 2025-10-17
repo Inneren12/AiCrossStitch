@@ -6,6 +6,7 @@ import com.appforcross.editor.diagnostics.DiagnosticsManager
 import com.appforcross.editor.logging.Logger
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 
 object CatalogMapRunner {
     data class Output(
@@ -30,31 +31,31 @@ object CatalogMapRunner {
         val out = File(ctx.cacheDir, "palette_catalog.json")
         FileOutputStream(out).use { fos ->
             val sb = StringBuilder(4096)
-            sb.append("{\"brand\":\"").append(brand).append("\",")
+            sb.append("{\"brand\":").append(jsonString(brand)).append(',')
             sb.append("\"metrics\":{")
-                .append("\"avgDE\":").append("%.3f".format(res.metrics.avgDE)).append(',')
-                .append("\"maxDE\":").append("%.3f".format(res.metrics.maxDE)).append(',')
+                .append("\"avgDE\":").append(formatDecimal(res.metrics.avgDE)).append(',')
+                .append("\"maxDE\":").append(formatDecimal(res.metrics.maxDE)).append(',')
                 .append("\"blends\":").append(res.metrics.blendsCount)
                 .append("},\"entries\":[")
             res.entries.forEachIndexed { i, e ->
                 if (i>0) sb.append(',')
                 sb.append("{\"idx\":").append(e.index)
-                    .append(",\"rgb\":\"").append(rgbHex(e.paletteRGB)).append("\"")
+                    .append(",\"rgb\":").append(jsonString(rgbHex(e.paletteRGB)))
                 when (val m = e.match) {
                     is CatalogMatch.Single -> {
-                        sb.append(",\"type\":\"single\",\"code\":\"").append(m.color.code).append("\",")
+                        sb.append(",\"type\":\"single\",\"code\":").append(jsonString(m.color.code)).append(',')
                             .append("\"name\":").append(jsonString(m.color.name)).append(',')
-                            .append("\"rgb\":\"").append(rgbHex(m.color.rgb)).append("\",")
-                            .append("\"dE\":").append("%.3f".format(m.dE))
+                            .append("\"rgb\":").append(jsonString(rgbHex(m.color.rgb))).append(',')
+                            .append("\"dE\":").append(formatDecimal(m.dE))
                     }
                     is CatalogMatch.Blend -> {
-                        sb.append(",\"type\":\"blend\",\"codeA\":\"").append(m.a.code).append("\",")
-                            .append("\"codeB\":\"").append(m.b.code).append("\",")
+                        sb.append(",\"type\":\"blend\",\"codeA\":").append(jsonString(m.a.code)).append(',')
+                            .append("\"codeB\":").append(jsonString(m.b.code)).append(',')
                             .append("\"nameA\":").append(jsonString(m.a.name)).append(',')
                             .append("\"nameB\":").append(jsonString(m.b.name)).append(',')
-                            .append("\"rgbA\":\"").append(rgbHex(m.a.rgb)).append("\",")
-                            .append("\"rgbB\":\"").append(rgbHex(m.b.rgb)).append("\",")
-                            .append("\"dE\":").append("%.3f".format(m.dE))
+                            .append("\"rgbA\":").append(jsonString(rgbHex(m.a.rgb))).append(',')
+                            .append("\"rgbB\":").append(jsonString(rgbHex(m.b.rgb))).append(',')
+                            .append("\"dE\":").append(formatDecimal(m.dE))
                     }
                 }
                 sb.append('}')
@@ -69,8 +70,8 @@ object CatalogMapRunner {
             }
         } catch (_: Exception) {}
         Logger.i("CATMAP", "done", mapOf(
-            "avgDE" to "%.3f".format(res.metrics.avgDE),
-            "maxDE" to "%.3f".format(res.metrics.maxDE),
+            "avgDE" to formatDecimal(res.metrics.avgDE),
+            "maxDE" to formatDecimal(res.metrics.maxDE),
             "blends" to res.metrics.blendsCount,
             "json" to out.absolutePath
         ))
@@ -81,5 +82,29 @@ object CatalogMapRunner {
         "#%02X%02X%02X".format(Color.red(rgb), Color.green(rgb), Color.blue(rgb))
 
     private fun jsonString(s: String?): String =
-        if (s == null) "null" else "\"" + s.replace("\"","\\\"") + "\""
+        if (s == null) "null" else "\"" + escapeJsonString(s) + "\""
+
+    private fun formatDecimal(value: Double): String =
+        String.format(Locale.US, "%.3f", value)
+
+    private fun escapeJsonString(value: String): String {
+        val sb = StringBuilder(value.length + 8)
+        for (ch in value) {
+            when (ch) {
+                '\\' -> sb.append("\\\\")
+                '"' -> sb.append("\\\"")
+                '\b' -> sb.append("\\b")
+                '\u000C' -> sb.append("\\f")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                else -> if (ch < ' ') {
+                    sb.append("\\u").append(ch.code.toString(16).padStart(4, '0'))
+                } else {
+                    sb.append(ch)
+                }
+            }
+        }
+        return sb.toString()
     }
+}
