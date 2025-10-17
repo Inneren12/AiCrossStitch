@@ -77,8 +77,8 @@ object QuantizeRunner {
             val ampSkyFlat = opt.orderedAmpSkyFlat
             val ampSkin = opt.orderedAmpSkin
             // применим малую амплитуду на всем изображении, а потом смешаем по маскам
-            val odAll = com.appforcross.editor.quant.Dither.ordered(working, ampSkyFlat)
-            val odSkin = if (ampSkin == ampSkyFlat) odAll else com.appforcross.editor.quant.Dither.ordered(working, ampSkin)
+            val odAll = Dither.ordered(working, ampSkyFlat)
+            val odSkin = if (ampSkin == ampSkyFlat) odAll else Dither.ordered(working, ampSkin)
             working = mixByMasks(working, odAll, masks.sky, 1f)
             working = mixByMasks(working, odAll, masks.flat, 0.7f)
             working = mixByMasks(working, odSkin, masks.skin, 1f)
