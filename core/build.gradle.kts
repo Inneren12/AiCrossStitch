@@ -3,6 +3,7 @@ plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
+    id("org.jetbrains.kotlin.plugin.compose") 
 }
 
 android {
@@ -15,25 +16,15 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.14"
-    }
-
     buildFeatures {
         buildConfig = false
         compose = true
     }
 }
 
-kotlin {
-    jvmToolchain(17)
-}
-
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-}
+kotlin { jvmToolchain(17) }
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach { kotlinOptions.jvmTarget = "17" }
+ 
 
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.04.01"))
@@ -47,4 +38,11 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     // Короутины для DataStore и UI (Main dispatcher)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+      testImplementation("junit:junit:4.13.2")
+    testImplementation("io.mockk:mockk:1.13.12")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    testImplementation("app.cash.turbine:turbine:1.1.0")
+    testImplementation("com.google.truth:truth:1.4.2")
+    testImplementation("org.robolectric:robolectric:4.12.1")
+
 }
