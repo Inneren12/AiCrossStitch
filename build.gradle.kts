@@ -4,6 +4,7 @@ plugins {
     id("com.android.library") version "8.5.2" apply false
     id("org.jetbrains.kotlin.android") version "1.9.23" apply false
     id("org.jetbrains.kotlin.plugin.serialization") version "1.9.23" apply false
+id("org.gradle.toolchains.foojay-resolver-convention") version "0.8.0" apply false
 }
 
 allprojects {
