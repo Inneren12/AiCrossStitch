@@ -576,9 +576,14 @@ fun ImportTab() {
             LaunchedEffect(patOut?.previewPng, qOut?.colorPng) {
                 val outPath = patOut?.previewPng
                 val colorPng = qOut?.colorPng
-                if (outPath != null && colorPng != null) {
-                    withContext(Dispatchers.IO) {
-                        // 6px клетка, жирная каждая 10-я. Можно связать с вводом Cell size mm, если нужно.
+                if (outPath == null) {
+                    pngPreviewBmp = null
+                    return@LaunchedEffect
+                }
+
+                val bmp = withContext(Dispatchers.IO) {
+                    val previewFile = File(outPath)
+                    if (!previewFile.exists() && colorPng != null) {
                         PreviewBuilder.fromQuantColor(
                             quantColorPath = colorPng,
                             outPath = outPath,
@@ -586,42 +591,28 @@ fun ImportTab() {
                             boldEvery = 10,
                             maxSidePx = 2800
                         )
-                        // Диагностика: вызываем существующий метод ДВАЖДЫ (квант-индекс и паттерн-индекс)
+                    }
+                    if (colorPng != null) {
                         val palSize = try { qOut?.palette?.size } catch (_: Throwable) { null }
-                        // 1) Квант-индекс (рядом с quant_color.png: <dir>/index.bin)
                         val qIndexPath = File(colorPng).parentFile?.resolve("index.bin")?.absolutePath
                         PatternDiagnostics.logQuantAndIndexConsistency(
                             quantColorPath = colorPng,
                             indexBinPath = qIndexPath,
                             paletteSize = palSize
                         )
-                        // 2) Паттерн-индекс (pattern_index.bin из S9)
                         PatternDiagnostics.logQuantAndIndexConsistency(
                             quantColorPath = colorPng,
                             indexBinPath = patOut?.indexBin,
                             paletteSize = palSize
                         )
                     }
-                    pngPreviewBmp = withContext(Dispatchers.IO) {
-                        BitmapFactory.decodeFile(outPath)?.also { bm ->
-                            val meta = mapOf("path" to outPath, "w" to bm.width, "h" to bm.height)
-                            Logger.i("PREVIEW", "load.png", meta)
-                            LogcatKV.i("PREVIEW", "load.png", meta)
-                             }
-                    }
-                } else {
-                    // fallback: просто попробовать прочитать если уже есть
-                    val path = patOut?.previewPng
-                    pngPreviewBmp = withContext(Dispatchers.IO) {
-                        path?.let { p ->
-                            BitmapFactory.decodeFile(p)?.also { bm ->
-                                val meta = mapOf("path" to p, "w" to bm.width, "h" to bm.height)
-                                Logger.i("PREVIEW", "load.png", meta)
-                                LogcatKV.i("PREVIEW", "load.png", meta)
-                            }
-                        }
+                    BitmapFactory.decodeFile(outPath)?.also { bm ->
+                        val meta = mapOf("path" to outPath, "w" to bm.width, "h" to bm.height)
+                        Logger.i("PREVIEW", "load.png", meta)
+                        LogcatKV.i("PREVIEW", "load.png", meta)
                     }
                 }
+                pngPreviewBmp = bmp
             }
 
             Box(Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 520.dp)) {
