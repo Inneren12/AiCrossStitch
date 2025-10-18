@@ -15,6 +15,7 @@ import java.io.FileOutputStream
 import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import android.util.Log
 
 /** Оркестратор квантизации + дизеринга поверх результата PreScale. */
 object QuantizeRunner {
@@ -174,18 +175,24 @@ object QuantizeRunner {
         } catch (_: Exception) {}
 
         // sanity: длина индексов должна равняться w*h (1 байт/пиксель)
+
         val expected = w * h
         val got = indexBin.length().toInt()
         if (got != expected) {
-            Logger.w("QUANT", "QOUT.mismatch", mapOf("pairId" to suffix, "w" to w, "h" to h, "expect" to expected, "index.len" to got))
+            val meta = mapOf("pairId" to suffix, "w" to w, "h" to h, "expect" to expected, "index.len" to got)
+            Logger.w("QUANT", "QOUT.mismatch", meta)
+            Log.i("AiX/QUANT", buildString {
+                append("QOUT.mismatch"); meta.entries.sortedBy { it.key }.forEach { (k,v) -> append(' ').append(k).append('=').append(v) }
+            })
         } else {
-                Logger.i("QUANT", "QOUT", mapOf("pairId" to suffix, "w" to w, "h" to h, "index.len" to got))
+                val meta = mapOf("pairId" to suffix, "w" to w, "h" to h, "K" to pal.size, "index.len" to got)
+            Logger.i("QUANT", "QOUT", meta)
+            Log.i("AiX/QUANT", buildString {
+                append("QOUT"); meta.entries.sortedBy { it.key }.forEach { (k,v) -> append(' ').append(k).append('=').append(v) }
+            })
             }
-               Logger.i("QUANT", "done", mapOf(
-            "colorPng" to outColor.absolutePath,
-            "indexBin" to indexBin.absolutePath,
-            "palette" to palJson.absolutePath
-        ))
+        Logger.i("QUANT", "done", mapOf("colorPng" to outColor.absolutePath, "indexBin" to indexBin.absolutePath))
+
         bmp.recycle()
         recycleMasks(masks)
         return Output(
