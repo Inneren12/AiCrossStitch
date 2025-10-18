@@ -71,32 +71,17 @@ object PatternRunner {
     // ========= CORE S9: quant→legend LUT + safe writer =========
 
     /** Строит LUT: quantIndex -> legendIndex (оба массивы RGB, IntArray) */
-    private fun buildQuantToLegendLut(quantPalette: IntArray, legendRgb: IntArray): IntArray {
-        if (legendRgb.isEmpty()) return IntArray(quantPalette.size) { 0 }
-        val byRgb = HashMap<Int, Int>(legendRgb.size).apply {
-            legendRgb.forEachIndexed { i, c -> put(c, i) }
+    fun buildQuantToLegendLut(quantPalette: IntArray, legendRgb: IntArray): IntArray {
+        // STRICT: легенда обязана покрывать все индексы кванта 1:1.
+        require(quantPalette.isNotEmpty()) { "quant palette is empty" }
+        require(legendRgb.size == quantPalette.size) {
+            "Strict LUT: legendK=${legendRgb.size} != quantK=${quantPalette.size}"
         }
-        var exact = 0
-        var fallback = 0
-        val lut = IntArray(quantPalette.size) { 0 }
-        for (qi in quantPalette.indices) {
-            val rgb = quantPalette[qi]
-            val li = byRgb[rgb]
-            if (li != null) {
-                exact++
-                lut[qi] = li
-            } else {
-                fallback++
-                lut[qi] = nearestLegend(rgb, legendRgb)
-            }
-        }
-        Logger.i(
-            "PATTERN", "lut.stats",
-            mapOf("quantK" to quantPalette.size, "legendK" to legendRgb.size, "exact" to exact, "fallback" to fallback)
-        )
+        // Индекс-в-индекс: qi -> qi. Никаких nearest/fallback при строгом каталоге.
+        val lut = IntArray(quantPalette.size) { it }
+        Logger.i("PATTERN", "lut.stats", mapOf("quantK" to quantPalette.size, "legendK" to legendRgb.size, "mode" to "identity"))
         return lut
     }
-
     private fun nearestLegend(rgb: Int, legendRgb: IntArray): Int {
         if (legendRgb.isEmpty()) return 0
         var best = 0

@@ -4,12 +4,25 @@ import android.graphics.Color
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sqrt
+import com.appforcross.editor.catalog.ThreadCatalog.*   // ThreadColor, items, topNForBlend
+
 
 data class CatalogMapOptions(
     val allowBlends: Boolean = true,
     val maxBlends: Int = 4,           // лимит на кол-во блендов в палитре
     val blendPenalty: Double = 0.7,   // штраф за бленд в целевой метрике (чтобы не злоупотреблять)
     val topNForBlend: Int = 8         // пары ищем среди top-N одиночных ближайших
+)
+
+data class ThreadColor(
+    val code: String,
+    val rgb: Int,
+    val okL: Float,
+    val okA: Float,
+    val okB: Float
+    )
+data class ThreadCatalog(
+    val items: List<ThreadColor>
 )
 
 sealed class CatalogMatch {
