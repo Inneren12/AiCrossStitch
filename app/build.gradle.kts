@@ -87,9 +87,6 @@ dependencies {
     testImplementation("org.robolectric:android-all-instrumented:14-robolectric-10818077-i6")
     testImplementation("androidx.test:core-ktx:1.6.1")
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
     // опционально — если надо дергать Android API на JVM (без эмулятора)
     testImplementation("org.robolectric:robolectric:4.12.1")
     implementation(project(":core"))
@@ -99,11 +96,6 @@ testImplementation("junit:junit:4.13.2")
   testImplementation("com.google.truth:truth:1.4.2")
   testImplementation("androidx.test:core-ktx:1.6.1")
 
-=======
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
 }
 
 tasks.withType<Test>().configureEach {
@@ -119,11 +111,4 @@ tasks.withType<Test>().configureEach {
             into(depsDirProvider.get())
         }
     }
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
 }
