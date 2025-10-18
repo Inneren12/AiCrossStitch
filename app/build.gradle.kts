@@ -9,6 +9,11 @@ android {
     namespace = "com.appforcross.app"
     compileSdk = 35
 
+    testOptions {
+       unitTests.isIncludeAndroidResources = true
+       unitTests.isReturnDefaultValues = true
+   }
+
     defaultConfig {
         applicationId = "com.appforcross.app"
         minSdk = 31
@@ -19,10 +24,6 @@ android {
     buildFeatures {
         buildConfig = true
     }
-    testOptions {
-        unitTests.isIncludeAndroidResources = true
-        unitTests.isReturnDefaultValues = true
-    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -30,10 +31,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-}
 
 kotlin {
     jvmToolchain(17)
+}
 }
 
 dependencies {
@@ -71,30 +72,21 @@ dependencies {
     // EXIF для поворота и метаданных
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
-    implementation(project(":core"))
+    implementation("androidx.activity:activity-compose:1.9.2")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("io.mockk:mockk:1.13.12")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     testImplementation("app.cash.turbine:turbine:1.1.0")
     testImplementation("com.google.truth:truth:1.4.2")
-    testImplementation("org.robolectric:robolectric:4.12.2")
-    testImplementation("org.robolectric:android-all-instrumented:14-robolectric-10818077-i6")
-    testImplementation("androidx.test:core-ktx:1.6.1")
 
-}
+    // опционально — если надо дергать Android API на JVM (без эмулятора)
+    testImplementation("org.robolectric:robolectric:4.12.1")
+    implementation(project(":core"))
 
-tasks.withType<Test>().configureEach {
-    val depsDirProvider = layout.buildDirectory.dir("robolectric-deps")
-    systemProperty("robolectric.offline", "true")
-    systemProperty("robolectric.dependency.dir", depsDirProvider.get().asFile.absolutePath)
-    doFirst {
-        val androidAll = classpath.files
-            .firstOrNull { it.name.startsWith("android-all-instrumented-14-robolectric-10818077-i6") }
-            ?: error("android-all-instrumented dependency missing from testRuntimeClasspath")
-        project.copy {
-            from(androidAll)
-            into(depsDirProvider.get())
-        }
-    }
+testImplementation("junit:junit:4.13.2")
+  testImplementation("org.robolectric:robolectric:4.12.2")
+  testImplementation("com.google.truth:truth:1.4.2")
+  testImplementation("androidx.test:core-ktx:1.6.1")
+
 }

@@ -34,125 +34,66 @@ object PatternRunner {
     )
 
     // ========= CORE S9 FIX: robust quant→legend LUT + safe writer =========
+    private data class LegendEntryLite(val rgb: Int)
 
     // --- LUT: строим соответствие quantPalette[i] → legendIndex ---
-    private fun buildQuantToLegendLut(quantPalette: IntArray, legendRgb: IntArray): IntArray {
-        if (legendRgb.isEmpty()) return IntArray(quantPalette.size)
-        val legendIndexByRgb = HashMap<Int, Int>(legendRgb.size)
-        legendRgb.forEachIndexed { index, rgb -> legendIndexByRgb[rgb] = index }
-        var exact = 0
-        var fallback = 0
+    private fun buildQuantToLegendLut(quantPalette: IntArray, legend: List<LegendEntryLite>): IntArray {
+        val byRgb = HashMap<Int, Int>(legend.size).apply {
+            legend.forEachIndexed { li, e -> put(e.rgb, li) }
+        }
+        var exact = 0; var fallback = 0
         val lut = IntArray(quantPalette.size) { 0 }
         for (qi in quantPalette.indices) {
             val rgb = quantPalette[qi]
-            val legendIndex = legendIndexByRgb[rgb]
-            if (legendIndex != null) {
-                exact++
-                lut[qi] = legendIndex
-            } else {
-                lut[qi] = nearestLegend(rgb, legendRgb)
-                fallback++
-            }
+            val li = byRgb[rgb] ?: nearestLegend(rgb, legend).also { fallback++ }
+            if (byRgb.containsKey(rgb)) exact++
+            lut[qi] = li
         }
-        Logger.i(
-            "PATTERN",
-            "lut.stats",
-            mapOf(
-                "quantK" to quantPalette.size,
-                "legendK" to legendRgb.size,
-                "exact" to exact,
-                "fallback" to fallback
-            )
-        )
+        Logger.i("PATTERN","lut.stats", mapOf("quantK" to quantPalette.size, "legendK" to legend.size, "exact" to exact, "fallback" to fallback))
         return lut
     }
 
-    private fun nearestLegend(rgb: Int, legendRgb: IntArray): Int {
-        if (legendRgb.isEmpty()) return 0
+        private fun nearestLegend(rgb: Int, legend: List<LegendEntryLite>): Int {
         var best = 0
         var bestD = Int.MAX_VALUE
         val r = (rgb ushr 16) and 0xFF
         val g = (rgb ushr 8) and 0xFF
         val b = rgb and 0xFF
-        legendRgb.forEachIndexed { index, legendColor ->
-            val er = (legendColor ushr 16) and 0xFF
-            val eg = (legendColor ushr 8) and 0xFF
-            val eb = legendColor and 0xFF
-            val dr = r - er
-            val dg = g - eg
-            val db = b - eb
-            val dist = dr * dr + dg * dg + db * db
-            if (dist < bestD) {
-                bestD = dist
-                best = index
-            }
+        legend.forEachIndexed { li, e ->
+            val er = (e.rgb ushr 16) and 0xFF
+            val eg = (e.rgb ushr 8) and 0xFF
+            val eb = e.rgb and 0xFF
+            val dr = r - er; val dg = g - eg; val db = b - eb
+            val d = dr*dr + dg*dg + db*db
+            if (d < bestD) { bestD = d; best = li }
         }
         return best
     }
 
-    private fun buildQuantPaletteFromColor(
-        color: Bitmap,
-        indices: IntArray,
-        fallbackPalette: IntArray
-    ): IntArray {
-        val paletteSize = fallbackPalette.size
-        if (paletteSize == 0) return IntArray(0)
-        val sumR = LongArray(paletteSize)
-        val sumG = LongArray(paletteSize)
-        val sumB = LongArray(paletteSize)
-        val count = IntArray(paletteSize)
-        val row = IntArray(color.width)
-        var p = 0
-        for (y in 0 until color.height) {
-            color.getPixels(row, 0, color.width, 0, y, color.width, 1)
-            for (x in 0 until color.width) {
-                val idx = indices[p++].coerceIn(0, paletteSize - 1)
-                val c = row[x]
-                sumR[idx] += Color.red(c).toLong()
-                sumG[idx] += Color.green(c).toLong()
-                sumB[idx] += Color.blue(c).toLong()
-                count[idx]++
-            }
-        }
-        val out = IntArray(paletteSize)
-        for (i in 0 until paletteSize) {
-            if (count[i] > 0) {
-                val r = (sumR[i] / count[i]).toInt().coerceIn(0, 255)
-                val g = (sumG[i] / count[i]).toInt().coerceIn(0, 255)
-                val b = (sumB[i] / count[i]).toInt().coerceIn(0, 255)
-                out[i] = Color.rgb(r, g, b)
-            } else {
-                out[i] = fallbackPalette[i]
-            }
-        }
-        return out
-    }
-
     // --- читаем квант-индексы как IntArray (px элементов, elemSize=1/2/4 подхватываем авто) ---
     private fun readQuantIndex(quantIndexPath: String, px: Int): IntArray {
-        val file = File(quantIndexPath)
-        val length = file.length()
-        val elemSize = when (length) {
-            px.toLong() -> 1
-            px * 2L -> 2
-            px * 4L -> 4
-            else -> error("index.len=$length px=$px")
+        val f = File(quantIndexPath)
+        val elem = when (f.length().toInt()) {
+            px -> 1
+            px * 2 -> 2
+            px * 4 -> 4
+            else -> 1
         }
-        val buffer = ByteArray(px * elemSize)
-        FileInputStream(file).use { input ->
-            var offset = 0
-            while (offset < buffer.size) {
-                val read = input.read(buffer, offset, buffer.size - offset)
-                if (read <= 0) break
-                offset += read
-            }
-        }
-        val bb = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
         val out = IntArray(px)
-        when (elemSize) {
-            1 -> for (i in 0 until px) out[i] = bb.get().toInt() and 0xFF
-            2 -> for (i in 0 until px) out[i] = bb.getShort().toInt() and 0xFFFF
-            else -> for (i in 0 until px) out[i] = bb.getInt()
+        FileInputStream(f).use { ins ->
+            val buf = ByteArray(px * elem)
+            var off = 0
+            while (off < buf.size) {
+                val n = ins.read(buf, off, buf.size - off)
+                if (n <= 0) break
+                off += n
+            }
+            val bb = ByteBuffer.wrap(buf).order(ByteOrder.LITTLE_ENDIAN)
+            when (elem) {
+                1 -> for (i in 0 until px) out[i] = bb.get().toInt() and 0xFF
+                2 -> for (i in 0 until px) out[i] = bb.short.toInt() and 0xFFFF
+                else -> for (i in 0 until px) out[i] = bb.int
+            }
         }
         return out
     }
@@ -160,26 +101,37 @@ object PatternRunner {
     // --- пишем pattern_index.bin как 1 байт/пикс. + логи min/max/unique ---
     private fun writePatternIndex(dstPath: String, indices: IntArray) {
         val bytes = ByteArray(indices.size)
-        for (i in indices.indices) {
-            val value = indices[i].coerceIn(0, 255)
-            bytes[i] = value.toByte()
-        }
+        for (i in indices.indices) bytes[i] = indices[i].toByte()
         FileOutputStream(File(dstPath)).use { it.write(bytes) }
-        var min = Int.MAX_VALUE
-        var max = Int.MIN_VALUE
+        var min = Int.MAX_VALUE; var max = Int.MIN_VALUE
         val seen = HashSet<Int>()
         indices.forEach { v ->
             if (v < min) min = v
             if (v > max) max = v
             seen += v
         }
-        if (min == Int.MAX_VALUE) min = 0
-        if (max == Int.MIN_VALUE) max = 0
-        Logger.i(
-            "PATTERN",
-            "write.stats",
-            mapOf("px" to indices.size, "min" to min, "max" to max, "unique" to seen.size)
-        )
+        Logger.i("PATTERN","write.stats", mapOf("px" to indices.size, "min" to min, "max" to max, "unique" to seen.size))
+    }
+
+    // ВСТАВЬ это место в твоём run()/build() ровно там, где раньше формировался pattern_index.bin
+    // Ниже — пример вызова (псевдоконтекст, подстрой под свои переменные):
+    private fun buildAndWritePatternIndex(
+        quantIndexPath: String,          // …/cache/index.bin (S7)
+        quantPalette: IntArray,          // qOut.palette (S7)
+        legendRgb: IntArray,             // rgb из pattern_legend.json (S9)
+        width: Int, height: Int,         // размеры исхода (или quant_color.png)
+        outPatternIndexPath: String      // …/cache/pattern_index.bin (S9)
+    ) {
+        val legendLite = legendRgb.map { LegendEntryLite(it) }
+        val lut = buildQuantToLegendLut(quantPalette, legendLite)
+        val px = width * height
+        val qIdx = readQuantIndex(quantIndexPath, px)
+        val out = IntArray(px)
+        for (i in 0 until px) {
+            val qi = qIdx[i]
+            out[i] = if (qi in lut.indices) lut[qi] else 0
+        }
+        writePatternIndex(outPatternIndexPath, out)
     }
 
     /** Главный метод: берём индексную карту + палитру, чистим топологию, назначаем символы и отрисовываем превью. */
@@ -201,6 +153,7 @@ object PatternRunner {
         val idx = readIndexBin(indexBinPath, w, h)
         // 1) быстрая edge‑маска по цветному PNG
         val edgeMask = makeEdgeMask(bmp)
+        bmp.recycle()
         // 2) чистка: min‑run (строки/столбцы), island‑kill, CRF‑пасс
         val idx1 = idx.copyOf()
         minRunSmoothing(idx1, w, h, edgeMask, opt.minRunFlat, opt.minRunEdge)
@@ -210,23 +163,18 @@ object PatternRunner {
         val changesPer100 = measureThreadChangesPer100(idx1, w, h)
         val islandsPer1000 = measureSmallIslandsPer1000(idx1, w, h)
         val runMed = measureRunMedian(idx1, w, h)
-        // 3b) восстановление квант-палитры из цветного PNG и текущих индексов
-        val quantPalette = buildQuantPaletteFromColor(bmp, idx1, palette)
-        bmp.recycle()
         // 4) символизация + легенда (подтягиваем коды из catalog JSON, если есть)
         val legend = buildLegend(palette, catalogJsonPath)
-        val legendRgb = IntArray(palette.size) { palette[it] }
         val legendFile = File(ctx.cacheDir, "pattern_legend.json")
         FileOutputStream(legendFile).use { it.write(legend.toString().toByteArray()) }
         // 5) сохраняем итоговую индексную карту
         val outIndex = File(ctx.cacheDir, "pattern_index.bin")
-        val lut = buildQuantToLegendLut(quantPalette, legendRgb)
-        val mapped = IntArray(idx1.size)
-        for (i in idx1.indices) {
-            val qi = idx1[i]
-            mapped[i] = if (qi in lut.indices) lut[qi] else 0
+        FileOutputStream(outIndex).use { fos ->
+            val buf = ByteArray(w * h)
+            var p = 0
+            for (i in 0 until idx1.size) buf[p++] = idx1[i].coerceIn(0, palette.lastIndex).toByte()
+            fos.write(buf, 0, p)
         }
-        writePatternIndex(outIndex.absolutePath, mapped)
         // 6) превью
         val prev = renderPreview(idx1, w, h, palette, legend, maxSide = opt.previewMaxPx, drawGrid = opt.drawGrid)
         val prevFile = File(ctx.cacheDir, "pattern_preview.png")
@@ -259,7 +207,14 @@ object PatternRunner {
     }
 
     // ---------- I/O ----------
-    private fun readIndexBin(path: String, w: Int, h: Int): IntArray = readQuantIndex(path, w * h)
+    private fun readIndexBin(path: String, w: Int, h: Int): IntArray {
+        val bytes = File(path).readBytes()
+        require(bytes.size >= w * h) { "index.bin size ${bytes.size} < w*h=${w*h}" }
+        val out = IntArray(w * h)
+        var p = 0
+        for (i in 0 until w * h) out[p++] = bytes[i].toInt() and 0xFF
+        return out
+    }
 
     // ---------- Edge mask ----------
     private fun makeEdgeMask(src: Bitmap): BooleanArray {
