@@ -89,6 +89,7 @@ dependencies {
 
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     // опционально — если надо дергать Android API на JVM (без эмулятора)
     testImplementation("org.robolectric:robolectric:4.12.1")
     implementation(project(":core"))
@@ -99,6 +100,8 @@ testImplementation("junit:junit:4.13.2")
   testImplementation("androidx.test:core-ktx:1.6.1")
 
 =======
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
 }
@@ -117,6 +120,9 @@ tasks.withType<Test>().configureEach {
         }
     }
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
