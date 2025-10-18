@@ -48,6 +48,8 @@ import androidx.compose.ui.graphics.Color as ComposeColor
 import com.appforcross.editor.pattern.PreviewBuilder
 import com.appforcross.editor.pattern.PatternDiagnostics
 import com.appforcross.editor.logging.LogcatKV
+import com.appforcross.editor.pattern.PatternRunner.Output
+import com.appforcross.editor.pattern.PatternRunner.Options
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

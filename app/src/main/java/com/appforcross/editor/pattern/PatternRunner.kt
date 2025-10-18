@@ -17,6 +17,7 @@ import kotlin.math.min
 import java.util.ArrayDeque
 import java.util.HashMap
 import java.util.HashSet
+import com.appforcross.editor.catalog.CatalogMapRunner
 
 object PatternRunner {
 
