@@ -173,7 +173,15 @@ object QuantizeRunner {
             }
         } catch (_: Exception) {}
 
-        Logger.i("QUANT", "done", mapOf(
+        // sanity: длина индексов должна равняться w*h (1 байт/пиксель)
+        val expected = w * h
+        val got = indexBin.length().toInt()
+        if (got != expected) {
+            Logger.w("QUANT", "QOUT.mismatch", mapOf("pairId" to suffix, "w" to w, "h" to h, "expect" to expected, "index.len" to got))
+        } else {
+                Logger.i("QUANT", "QOUT", mapOf("pairId" to suffix, "w" to w, "h" to h, "index.len" to got))
+            }
+               Logger.i("QUANT", "done", mapOf(
             "colorPng" to outColor.absolutePath,
             "indexBin" to indexBin.absolutePath,
             "palette" to palJson.absolutePath
