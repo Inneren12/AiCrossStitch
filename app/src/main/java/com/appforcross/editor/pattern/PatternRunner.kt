@@ -237,10 +237,15 @@ object PatternRunner {
         }
         mags.sort()
         val thr = if (mags.isEmpty()) {
-            0
+            Int.MAX_VALUE
         } else {
             val pos = (mags.size * 0.85).toInt().coerceIn(0, mags.lastIndex)
-            mags[pos]
+            val candidate = mags[pos]
+            if (candidate == 0) {
+                mags.firstOrNull { it > 0 } ?: Int.MAX_VALUE
+            } else {
+                candidate
+            }
         }
         for (y in 1 until h - 1) for (x in 1 until w - 1) {
             val gx = L[y * w + x] - L[y * w + (x - 1)]

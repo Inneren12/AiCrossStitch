@@ -681,7 +681,7 @@ fun ImportTab() {
                 }
             }
 
-            fun saveLegendOverridesNow(rows: List<LegendRowUI>) {
+            fun saveLegendOverrides(rows: List<LegendRowUI>) {
                 val base = legendBase
                 val newOv = mutableMapOf<Int, String>()
                 rows.forEach { row ->
@@ -691,17 +691,24 @@ fun ImportTab() {
                     }
                 }
                 legendOverrides = newOv
-                val root = legendJsonRoot ?: return
-                val ovObj = JSONObject()
-                newOv.forEach { (k, v) -> ovObj.put(k.toString(), v) }
-                root.put("overrides", ovObj)
-                try {
-                    val path = legendPath ?: return
-                    File(path).writeText(root.toString())
-                    Logger.i("UI","LEGEND.save", mapOf("overrides" to newOv.size))
-                } catch (e: Exception) {
-                    err = "Legend save failed: $e"
-                    Logger.e("UI","LEGEND.save.fail", err = e)
+                val currentRoot = legendJsonRoot ?: return
+                val path = legendPath ?: return
+                val updatedRoot = JSONObject(currentRoot.toString()).apply {
+                    val ovObj = JSONObject()
+                    newOv.forEach { (k, v) -> ovObj.put(k.toString(), v) }
+                    put("overrides", ovObj)
+                }
+                legendJsonRoot = updatedRoot
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            File(path).writeText(updatedRoot.toString())
+                        }
+                        Logger.i("UI","LEGEND.save", mapOf("overrides" to newOv.size))
+                    } catch (e: Exception) {
+                        err = "Legend save failed: $e"
+                        Logger.e("UI","LEGEND.save.fail", err = e)
+                    }
                 }
             }
 
@@ -758,7 +765,7 @@ fun ImportTab() {
                     onDismissRequest = { symbolDialogFor = null },
                     confirmButton = {
                         TextButton(onClick = {
-                            val desired = (symbolDraft.ifEmpty { "?" }).take(1)
+                            val desired = symbolDraft.trim().ifEmpty { "?" }
                             val rows = legendRows!!.toMutableList()
                             val i = rows.indexOfFirst { it.idx == idx }
                             if (i >= 0) {
@@ -774,7 +781,7 @@ fun ImportTab() {
                                     // no-op (same symbol)
                                 }
                                 legendRows = rows
-                                saveLegendOverridesNow(rows)
+                                saveLegendOverrides(rows)
                             }
                             symbolDialogFor = null
                         }) { Text("Apply") }
@@ -785,7 +792,7 @@ fun ImportTab() {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedTextField(
                                 value = symbolDraft,
-                                onValueChange = { v -> symbolDraft = v.take(2) }, // небольшой гард
+                                onValueChange = { v -> symbolDraft = v.take(5) }, // allow multi-prime symbols
                                 label = { Text("Custom symbol") }
                             )
                             FlowRowOrColumn(
